@@ -393,6 +393,12 @@ run_single_installation() {
     fi
     sleep 2
 
+    # Select or create user for installation
+    select_or_create_user || {
+        echo -e "${RED}User selection failed. Exiting.${NC}"
+        exit 1
+    }
+
     check_existing_installations
 
     if [[ "$bench_version" == "version-15" || "$bench_version" == "version-16" || "$bench_version" == "develop" ]]; then
@@ -424,7 +430,7 @@ run_single_installation() {
 
     check_os
 
-    cd "$(sudo -u $USER echo $HOME)"
+    cd "$(sudo -u "$INSTALL_USER" echo "$INSTALL_HOME")"
 
     echo -e "${YELLOW}Now let's set some important parameters...${NC}"
     sleep 1
@@ -653,7 +659,9 @@ EOF'
     echo -e "${LIGHT_BLUE}If you get a restart failed, don't worry, we will resolve that later.${NC}"
     read -p "Enter a name for your bench folder (default: frappe-bench): " bench_name
     bench_name=${bench_name:-frappe-bench}
-    bench init "$bench_name" --version "$bench_version" --verbose
+    
+    # Initialize bench as the selected user
+    sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME' && bench init '$bench_name' --version '$bench_version' --verbose"
     echo -e "${GREEN}Bench installation complete!${NC}"
     sleep 1
 
@@ -667,12 +675,10 @@ EOF'
     sleep 1
 
     cd "$bench_name" && \
-    sudo chmod -R o+rx "$(echo $HOME)"
+    sudo chmod -R o+rx "$INSTALL_HOME"
 
-    bench new-site "$site_name" \
-      --db-root-username root \
-      --db-root-password "$sqlpasswrd" \
-      --admin-password "$adminpasswrd"
+    # Create new site as the selected user
+    sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench new-site '$site_name' --db-root-username root --db-root-password '$sqlpasswrd' --admin-password '$adminpasswrd'"
 
     if [[ "$bench_version" == "version-15" || "$bench_version" == "version-16" || "$bench_version" == "develop" ]]; then
         echo -e "${YELLOW}Starting Redis instances for $bench_version (queue, cache, and socketio)...${NC}"
@@ -691,8 +697,8 @@ EOF'
     case "$erpnext_install" in
         "yes"|"y")
         sleep 2
-        bench get-app erpnext --branch "$bench_version" && \
-        bench --site "$site_name" install-app erpnext
+        sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench get-app erpnext --branch '$bench_version'" && \
+        sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' install-app erpnext"
         sleep 1
         ;;
     esac
@@ -752,7 +758,7 @@ EOF'
             sleep 1
 
             FILE="/etc/supervisor/supervisord.conf"
-            SEARCH_PATTERN="chown=$USER:$USER"
+            SEARCH_PATTERN="chown=$INSTALL_USER:$INSTALL_USER"
 
             if grep -q "$SEARCH_PATTERN" "$FILE"; then
                 echo -e "${YELLOW}User ownership already exists for supervisord. Updating it...${NC}"
@@ -763,34 +769,62 @@ EOF'
             fi
 
             sudo service supervisor restart && \
-            yes | sudo bench setup production "$USER" && \
+            yes | sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench setup production '$INSTALL_USER'" && \
             echo -e "${YELLOW}Enabling Scheduler...${NC}"
             sleep 1
 
-            bench --site "$site_name" scheduler enable && \
-            bench --site "$site_name" scheduler resume
+            sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' scheduler enable" && \
+            sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' scheduler resume"
 
             if [[ "$bench_version" == "version-15" || "$bench_version" == "version-16" || "$bench_version" == "develop" ]]; then
                 echo -e "${YELLOW}Setting up Socketio, Redis and Supervisor for $bench_version...${NC}"
                 sleep 1
-                bench setup socketio
-                yes | bench setup supervisor
-                bench setup redis
+                sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench setup socketio"
+                yes | sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench setup supervisor"
+                sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench setup redis"
                 sudo supervisorctl reload
             fi
 
             echo -e "${YELLOW}Restarting bench to apply all changes and optimizing environment permissions.${NC}"
             sleep 1
 
-            sudo chmod 755 "$(echo $HOME)"
+            sudo chmod 755 "$INSTALL_HOME"
             
             echo -e "${YELLOW}Configuring Redis services...${NC}"
             sudo systemctl restart redis-server
             sleep 2
             
-            if ! sudo supervisorctl restart all; then
-                echo -e "${YELLOW}Warning: supervisorctl restart all reported errors. Some services (often Redis) may have failed to spawn.${NC}"
-                echo -e "${YELLOW}You can retry later with: sudo supervisorctl restart all${NC}"
+            # Enhanced service restart with better error handling
+            echo -e "${YELLOW}Restarting all services with enhanced error handling...${NC}"
+            
+            # Stop all services first
+            sudo supervisorctl stop all 2>/dev/null || true
+            sleep 2
+            
+            # Start Redis services first
+            if [[ "$bench_version" == "version-15" || "$bench_version" == "version-16" || "$bench_version" == "develop" ]]; then
+                echo -e "${LIGHT_BLUE}Starting Redis services...${NC}"
+                sudo supervisorctl start redis-cache 2>/dev/null || true
+                sudo supervisorctl start redis-queue 2>/dev/null || true
+                sudo supervisorctl start redis-socketio 2>/dev/null || true
+                sleep 2
+            fi
+            
+            # Start remaining services
+            echo -e "${LIGHT_BLUE}Starting remaining services...${NC}"
+            sudo supervisorctl start all 2>/dev/null || true
+            sleep 3
+            
+            # Check service status
+            echo -e "${LIGHT_BLUE}Checking service status...${NC}"
+            sudo supervisorctl status
+            
+            if ! sudo supervisorctl status | grep -q "RUNNING"; then
+                echo -e "${YELLOW}Warning: Some services may not be running properly.${NC}"
+                echo -e "${YELLOW}You can check status with: sudo supervisorctl status${NC}"
+                echo -e "${YELLOW}You can restart services with: sudo supervisorctl restart all${NC}"
+            else
+                echo -e "${GREEN}✓ All services are running properly!${NC}"
             fi
             sleep 3
 
@@ -1177,7 +1211,7 @@ EOF'
                                             download_success=false
                                             
                                             echo -e "${YELLOW}📽 Downloading from branch '$best_branch'...${NC}"
-                                            if bench get-app "$selected_url" --branch "$best_branch" --skip-assets 2>/tmp/bench_error_$.log; then
+                                            if sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench get-app '$selected_url' --branch '$best_branch' --skip-assets" 2>/tmp/bench_error_$.log; then
                                                 download_success=true
                                                 echo -e "${GREEN}✅ Successfully downloaded \"$selected_display_name\" from branch '$best_branch'.${NC}"
                                             else
@@ -1200,7 +1234,7 @@ EOF'
                                                     
                                                     if [[ -n "$extracted_app_name" ]]; then
                                                         echo -e "${LIGHT_BLUE}Found app name in setup.py: \"$extracted_app_name\"${NC}"
-                                                        if bench --site "$site_name" install-app "$extracted_app_name" 2>/dev/null; then
+                                                        if sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' install-app '$extracted_app_name'" 2>/dev/null; then
                                                             echo -e "${GREEN}✓ Successfully installed using setup.py name.${NC}"
                                                             successful_installations+=("$selected_display_name (branch: $best_branch)")
                                                             app_installed=true
@@ -1214,7 +1248,7 @@ EOF'
                                                 
                                                 if [[ "$app_installed" == false ]]; then
                                                     echo -e "${LIGHT_BLUE}Trying repo name: \"$selected_repo\"${NC}"
-                                                    if bench --site "$site_name" install-app "$selected_repo" 2>/dev/null; then
+                                                    if sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' install-app '$selected_repo'" 2>/dev/null; then
                                                         echo -e "${GREEN}✓ Successfully installed using repo name.${NC}"
                                                         successful_installations+=("$selected_display_name (branch: $best_branch)")
                                                         app_installed=true
@@ -1226,7 +1260,7 @@ EOF'
                                                     
                                                     if [[ "$transformed_name" != "$selected_repo" ]]; then
                                                         echo -e "${LIGHT_BLUE}Trying transformed name: \"$transformed_name\"${NC}"
-                                                        if bench --site "$site_name" install-app "$transformed_name" 2>/dev/null; then
+                                                        if sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' install-app '$transformed_name'" 2>/dev/null; then
                                                             echo -e "${GREEN}✓ Successfully installed using transformed name.${NC}"
                                                             successful_installations+=("$selected_display_name (branch: $best_branch)")
                                                             app_installed=true
@@ -1238,7 +1272,7 @@ EOF'
                                                     lowercase_name=$(echo "$selected_repo" | tr '[:upper:]' '[:lower:]')
                                                     if [[ "$lowercase_name" != "$selected_repo" ]]; then
                                                         echo -e "${LIGHT_BLUE}Trying lowercase: \"$lowercase_name\"${NC}"
-                                                        if bench --site "$site_name" install-app "$lowercase_name" 2>/dev/null; then
+                                                        if sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' install-app '$lowercase_name'" 2>/dev/null; then
                                                             echo -e "${GREEN}✓ Successfully installed using lowercase name.${NC}"
                                                             successful_installations+=("$selected_display_name (branch: $best_branch)")
                                                             app_installed=true
@@ -1252,7 +1286,7 @@ EOF'
                                                             potential_app_name=$(basename "$subdir")
                                                             if [[ "$potential_app_name" != "tests" && "$potential_app_name" != "docs" && "$potential_app_name" != "__pycache__" ]]; then
                                                                 echo -e "${LIGHT_BLUE}Trying directory name: \"$potential_app_name\"${NC}"
-                                                                if bench --site "$site_name" install-app "$potential_app_name" 2>/dev/null; then
+                                                                if sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench --site '$site_name' install-app '$potential_app_name'" 2>/dev/null; then
                                                                     echo -e "${GREEN}✓ Successfully installed using directory name.${NC}"
                                                                     successful_installations+=("$selected_display_name (branch: $best_branch)")
                                                                     app_installed=true
@@ -1317,9 +1351,25 @@ EOF'
                                         rm -rf "$tmp_dir"
                                         
                                         if [ "${#successful_installations[@]}" -gt 0 ]; then
-                                            echo -e "${YELLOW}Restarting services to apply changes...${NC}"
-                                            sudo supervisorctl restart all 2>/dev/null || true
-                                            echo -e "${GREEN}Services restarted successfully.${NC}"
+                                            echo -e "${YELLOW}Restarting services to apply changes from new apps...${NC}"
+                                            
+                                            # Enhanced restart for app installations
+                                            sudo supervisorctl stop all 2>/dev/null || true
+                                            sleep 2
+                                            sudo supervisorctl start all 2>/dev/null || true
+                                            sleep 3
+                                            
+                                            # Verify services are running
+                                            if sudo supervisorctl status | grep -q "RUNNING"; then
+                                                echo -e "${GREEN}✓ Services restarted successfully after app installation!${NC}"
+                                            else
+                                                echo -e "${YELLOW}⚠ Some services may need manual restart. Run: sudo supervisorctl restart all${NC}"
+                                            fi
+                                            
+                                            # Additional bench commands to ensure apps are properly loaded
+                                            echo -e "${LIGHT_BLUE}Reloading bench configuration...${NC}"
+                                            sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench build" 2>/dev/null || true
+                                            echo -e "${GREEN}✓ Apps installation and service restart completed!${NC}"
                                         fi
                                     fi
                                 fi
@@ -1407,8 +1457,8 @@ EOF'
             else
                 nvm alias default 16
             fi
-            bench use "$site_name"
-            bench build
+            sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench use '$site_name'"
+            sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench build"
             echo -e "${GREEN}Done!${NC}"
             sleep 5
 
