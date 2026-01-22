@@ -435,9 +435,32 @@ run_single_installation() {
 
 # OS check will be done during installation
 
-    cd "$(sudo -u "$INSTALL_USER" echo "$INSTALL_HOME")"
-
     echo -e "${YELLOW}Now let's set some important parameters...${NC}"
+    echo -e "${LIGHT_BLUE}All operations will be performed as user: $INSTALL_USER${NC}"
+    
+    # Ensure the user's home directory exists and has proper permissions
+    if [[ ! -d "$INSTALL_HOME" ]]; then
+        echo -e "${YELLOW}Creating home directory for $INSTALL_USER...${NC}"
+        sudo mkdir -p "$INSTALL_HOME"
+        sudo chown "$INSTALL_USER:$INSTALL_USER" "$INSTALL_HOME"
+    fi
+    
+    # Ensure proper permissions
+    sudo chown -R "$INSTALL_USER:$INSTALL_USER" "$INSTALL_HOME"
+    sudo chmod 755 "$INSTALL_HOME"
+    
+    # Test directory access
+    if ! sudo -u "$INSTALL_USER" test -r "$INSTALL_HOME"; then
+        echo -e "${RED}Cannot access $INSTALL_HOME as user $INSTALL_USER${NC}"
+        echo -e "${YELLOW}Attempting to fix permissions...${NC}"
+        sudo chmod -R u+rwX "$INSTALL_HOME"
+        if ! sudo -u "$INSTALL_USER" test -r "$INSTALL_HOME"; then
+            echo -e "${RED}Failed to access $INSTALL_HOME. Please check permissions.${NC}"
+            exit 1
+        fi
+    fi
+    
+    echo -e "${GREEN}✓ Directory access confirmed for $INSTALL_USER${NC}"
     sleep 1
     echo -e "${YELLOW}We will need your required SQL root password${NC}"
     sleep 1
@@ -679,8 +702,11 @@ EOF'
     echo -e "${YELLOW}Now setting up your site. This might take a few minutes. Please wait...${NC}"
     sleep 1
 
-    cd "$bench_name" && \
+    # Set permissions for the installation
     sudo chmod -R o+rx "$INSTALL_HOME"
+    
+    # We'll work from the current directory but use full paths
+    echo -e "${LIGHT_BLUE}Working from current directory with full paths to $INSTALL_HOME${NC}"
 
     # Create new site as the selected user
     sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME/$bench_name' && bench new-site '$site_name' --db-root-username root --db-root-password '$sqlpasswrd' --admin-password '$adminpasswrd'"
