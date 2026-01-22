@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-handle_error( ) {
+handle_error() {
     local line=$1
     local exit_code=$?
     echo "An error occurred on line $line with exit status $exit_code"
@@ -104,22 +104,14 @@ ask_twice() {
     done
 }
 
-# Function to create user if doesn't exist
 create_user_if_not_exists() {
     local user="$1"
     
     if ! id "$user" &>/dev/null; then
         echo -e "${YELLOW}Creating new user: $user...${NC}"
-        
-        # Create user without password prompt
         sudo adduser --disabled-password --gecos "" "$user" > /dev/null 2>&1
-        
-        # Add to sudo group
         sudo usermod -aG sudo "$user" > /dev/null 2>&1
-        
-        # Set default password
         echo "$user:$DEFAULT_PASSWORD" | sudo chpasswd > /dev/null 2>&1
-        
         echo -e "${GREEN}✓ User $user created successfully${NC}"
         echo -e "${YELLOW}Default password: $DEFAULT_PASSWORD${NC}"
         echo -e "${YELLOW}Please change password after first login${NC}"
@@ -128,7 +120,6 @@ create_user_if_not_exists() {
     fi
 }
 
-# Function to create or select user
 select_or_create_user() {
     echo -e "${YELLOW}Select installation user:${NC}"
     echo "1. Use current user ($(whoami))"
@@ -167,53 +158,6 @@ select_or_create_user() {
     esac
     
     return 0
-}
-
-# Function to generate unique port numbers
-generate_unique_ports() {
-    local version="$1"
-    local bench_name="$2"
-    local user="$3"
-    
-    # Create a unique identifier for this installation
-    local install_id="${user}_${bench_name}_${version}"
-    
-    # Generate simple hash from install_id
-    local hash_num=0
-    for (( i=0; i<${#install_id}; i++ )); do
-        char=$(printf '%d' "'${install_id:$i:1}")
-        hash_num=$((hash_num + char))
-    done
-    
-    # Generate unique ports for this installation
-    local mariadb_port=$((13306 + (hash_num % 1000)))
-    local redis_queue_port=$((15000 + (hash_num % 1000)))
-    local redis_cache_port=$((16000 + (hash_num % 1000)))
-    local redis_socketio_port=$((17000 + (hash_num % 1000)))
-    local bench_port=$((18000 + (hash_num % 1000)))
-    
-    # Check if ports are in use and adjust if needed
-    while nc -z 127.0.0.1 $mariadb_port 2>/dev/null; do
-        mariadb_port=$((mariadb_port + 1))
-    done
-    
-    while nc -z 127.0.0.1 $redis_queue_port 2>/dev/null; do
-        redis_queue_port=$((redis_queue_port + 1))
-    done
-    
-    while nc -z 127.0.0.1 $redis_cache_port 2>/dev/null; do
-        redis_cache_port=$((redis_cache_port + 1))
-    done
-    
-    while nc -z 127.0.0.1 $redis_socketio_port 2>/dev/null; do
-        redis_socketio_port=$((redis_socketio_port + 1))
-    done
-    
-    while nc -z 127.0.0.1 $bench_port 2>/dev/null; do
-        bench_port=$((bench_port + 1))
-    done
-    
-    echo "$mariadb_port:$redis_queue_port:$redis_cache_port:$redis_socketio_port:$bench_port"
 }
 
 extract_app_name_from_setup() {
@@ -257,29 +201,29 @@ check_existing_installations() {
     local installation_paths=()
     
     local search_paths=(
-        "$HOME/$bench_name"
-        "/home/*/$bench_name"
-        "/opt/$bench_name"
-        "/var/www/$bench_name"
+        "$HOME/frappe-bench*"
+        "/home/*/frappe-bench*"
     )
     
     echo -e "${YELLOW}Checking for existing ERPNext installations...${NC}"
     
-    for path in "${search_paths[@]}"; do
-        if [[ -d "$path" ]] && [[ -f "$path/apps/frappe/frappe/__init__.py" ]]; then
-            local version_info=""
-            if [[ -f "$path/apps/frappe/frappe/__version__.py" ]]; then
-                version_info=$(grep -o 'version.*=.*[0-9]' "$path/apps/frappe/frappe/__version__.py" 2>/dev/null || echo "unknown")
+    for path_pattern in "${search_paths[@]}"; do
+        for path in $path_pattern; do
+            if [[ -d "$path" ]] && [[ -f "$path/apps/frappe/frappe/__init__.py" ]]; then
+                local version_info=""
+                if [[ -f "$path/apps/frappe/frappe/__version__.py" ]]; then
+                    version_info=$(grep -o 'version.*=.*[0-9]' "$path/apps/frappe/frappe/__version__.py" 2>/dev/null || echo "unknown")
+                fi
+                
+                local branch_info=""
+                if [[ -d "$path/apps/frappe/.git" ]]; then
+                    branch_info=$(cd "$path/apps/frappe" && git branch --show-current 2>/dev/null || echo "unknown")
+                fi
+                
+                existing_installations+=("$path")
+                installation_paths+=("Path: $path | Version: $version_info | Branch: $branch_info")
             fi
-            
-            local branch_info=""
-            if [[ -d "$path/apps/frappe/.git" ]]; then
-                branch_info=$(cd "$path/apps/frappe" && git branch --show-current 2>/dev/null || echo "unknown")
-            fi
-            
-            existing_installations+=("$path")
-            installation_paths+=("Path: $path | Version: $version_info | Branch: $branch_info")
-        fi
+        done
     done
     
     if [[ ${#existing_installations[@]} -gt 0 ]]; then
@@ -387,218 +331,8 @@ detect_best_branch() {
     return 0
 }
 
-# Function to install ERPNext for a specific user with specific ports
-install_for_user() {
-    local user="$1"
-    local bench_version="$2"
-    local bench_name="$3"
-    local site_name="$4"
-    local sqlpasswrd="$5"
-    local adminpasswrd="$6"
-    local install_erpnext="$7"
-    local setup_production="$8"
-    
-    echo -e "${YELLOW}Starting installation for user: $user${NC}"
-    echo -e "${LIGHT_BLUE}Version: $bench_version${NC}"
-    echo -e "${LIGHT_BLUE}Bench name: $bench_name${NC}"
-    
-    # Generate unique ports
-    local unique_ports=$(generate_unique_ports "$bench_version" "$bench_name" "$user")
-    IFS=':' read -r mariadb_port redis_queue redis_cache redis_socketio bench_port <<< "$unique_ports"
-    
-    echo -e "${GREEN}Assigned ports for this installation:${NC}"
-    echo -e "  MariaDB: $mariadb_port"
-    echo -e "  Redis Queue: $redis_queue"
-    echo -e "  Redis Cache: $redis_cache"
-    echo -e "  Redis SocketIO: $redis_socketio"
-    echo -e "  Bench: $bench_port"
-    
-    # Switch to user context for installation
-    sudo -u "$user" bash << INSTALL_SCRIPT
-    set -e
-    cd "\$HOME"
-    
-    # Run the main installation steps
-    echo "Starting ERPNext installation as user: \$(whoami)"
-    
-    # Store variables for this installation
-    export BENCH_VERSION="$bench_version"
-    export BENCH_NAME="$bench_name"
-    export SITE_NAME="$site_name"
-    export SQLPASSWRD="$sqlpasswrd"
-    export ADMINPASSWRD="$adminpasswrd"
-    export INSTALL_ERPNEXT="$install_erpnext"
-    export SETUP_PRODUCTION="$setup_production"
-    export MARIADB_PORT="$mariadb_port"
-    export REDIS_QUEUE="$redis_queue"
-    export REDIS_CACHE="$redis_cache"
-    export REDIS_SOCKETIO="$redis_socketio"
-    export BENCH_PORT="$bench_port"
-    
-    # Continue with installation...
-    # [All the original installation code goes here, but adapted for user context]
-INSTALL_SCRIPT
-}
-
-# Main installation flow
-main_installation() {
-    clear
-    echo -e "${LIGHT_BLUE}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${LIGHT_BLUE}║        ERPNext Multi-User Installation Manager          ║${NC}"
-    echo -e "${LIGHT_BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    
-    echo -e "${YELLOW}Choose installation mode:${NC}"
-    echo "1. Single ERPNext installation (Original full script)"
-    echo "2. Multiple ERPNext versions (same user)"
-    echo "3. Exit"
-    
-    read -p "Enter choice (1-3): " mode_choice
-    
-    case $mode_choice in
-        1)
-            echo -e "${YELLOW}Starting original ERPNext installation...${NC}"
-            # Run the original full script logic here
-            run_original_installation
-            ;;
-            
-        2)
-            echo -e "${YELLOW}Multiple versions installation selected${NC}"
-            select_or_create_user || exit 1
-            
-            echo -e "${GREEN}User: $INSTALL_USER${NC}"
-            echo ""
-            
-            declare -a versions_to_install=()
-            declare -a bench_names=()
-            
-            while true; do
-                echo -e "${YELLOW}Add version to install:${NC}"
-                echo "1. Version 13"
-                echo "2. Version 14"
-                echo "3. Version 15"
-                echo "4. Version 16"
-                echo "5. Develop"
-                echo "6. Done adding versions"
-                
-                read -p "Enter choice (1-6): " version_add_choice
-                
-                case $version_add_choice in
-                    1)
-                        versions_to_install+=("version-13")
-                        read -p "Enter bench name for Version 13 (default: frappe-bench-13): " bench_name
-                        bench_names+=("${bench_name:-frappe-bench-13}")
-                        ;;
-                    2)
-                        versions_to_install+=("version-14")
-                        read -p "Enter bench name for Version 14 (default: frappe-bench-14): " bench_name
-                        bench_names+=("${bench_name:-frappe-bench-14}")
-                        ;;
-                    3)
-                        versions_to_install+=("version-15")
-                        read -p "Enter bench name for Version 15 (default: frappe-bench-15): " bench_name
-                        bench_names+=("${bench_name:-frappe-bench-15}")
-                        ;;
-                    4)
-                        versions_to_install+=("version-16")
-                        read -p "Enter bench name for Version 16 (default: frappe-bench-16): " bench_name
-                        bench_names+=("${bench_name:-frappe-bench-16}")
-                        ;;
-                    5)
-                        versions_to_install+=("develop")
-                        read -p "Enter bench name for Develop (default: frappe-bench-develop): " bench_name
-                        bench_names+=("${bench_name:-frappe-bench-develop}")
-                        ;;
-                    6)
-                        break
-                        ;;
-                    *)
-                        echo -e "${RED}Invalid choice${NC}"
-                        ;;
-                esac
-                
-                echo ""
-            done
-            
-            if [ ${#versions_to_install[@]} -eq 0 ]; then
-                echo -e "${RED}No versions selected. Exiting.${NC}"
-                exit 0
-            fi
-            
-            echo -e "${GREEN}Will install the following versions for user '$INSTALL_USER':${NC}"
-            for i in "${!versions_to_install[@]}"; do
-                echo -e "  • ${versions_to_install[$i]} -> ${bench_names[$i]}"
-            done
-            
-            read -p "Continue? (yes/no): " confirm_multiple
-            confirm_multiple=$(echo "$confirm_multiple" | tr '[:upper:]' '[:lower:]')
-            
-            if [[ "$confirm_multiple" != "yes" && "$confirm_multiple" != "y" ]]; then
-                echo -e "${RED}Installation cancelled.${NC}"
-                exit 0
-            fi
-            
-            # Get common parameters
-            echo -e "${YELLOW}Enter common parameters:${NC}"
-            sqlpasswrd=$(ask_twice "Enter MariaDB root password" "true")
-            adminpasswrd=$(ask_twice "Enter Administrator password" "true")
-            
-            # Install each version
-            for i in "${!versions_to_install[@]}"; do
-                echo ""
-                echo -e "${LIGHT_BLUE}══════════════════════════════════════════════════════════${NC}"
-                echo -e "${LIGHT_BLUE}  Installing ${versions_to_install[$i]} (${bench_names[$i]})  ${NC}"
-                echo -e "${LIGHT_BLUE}══════════════════════════════════════════════════════════${NC}"
-                
-                read -p "Enter site name for ${versions_to_install[$i]}: " site_name
-                read -p "Install ERPNext for ${versions_to_install[$i]}? (yes/no): " install_erpnext
-                install_erpnext=$(echo "$install_erpnext" | tr '[:upper:]' '[:lower:]')
-                read -p "Setup production for ${versions_to_install[$i]}? (yes/no): " setup_production
-                setup_production=$(echo "$setup_production" | tr '[:upper:]' '[:lower:]')
-                
-                # Run installation for this version
-                echo -e "${YELLOW}Installing ${versions_to_install[$i]} for user $INSTALL_USER...${NC}"
-                
-                # Create user if doesn't exist
-                create_user_if_not_exists "$INSTALL_USER"
-                
-                # Install for this user
-                install_for_user "$INSTALL_USER" "${versions_to_install[$i]}" "${bench_names[$i]}" \
-                    "$site_name" "$sqlpasswrd" "$adminpasswrd" "$install_erpnext" "$setup_production"
-                
-                echo -e "${GREEN}✓ Completed ${versions_to_install[$i]} installation${NC}"
-            done
-            
-            echo ""
-            echo -e "${GREEN}══════════════════════════════════════════════════════════${NC}"
-            echo -e "${GREEN}     All installations completed successfully!           ${NC}"
-            echo -e "${GREEN}══════════════════════════════════════════════════════════${NC}"
-            
-            echo -e "${YELLOW}Summary of installations for user '$INSTALL_USER':${NC}"
-            for i in "${!versions_to_install[@]}"; do
-                echo -e "  • ${bench_names[$i]} (${versions_to_install[$i]})"
-            done
-            echo ""
-            echo -e "${LIGHT_BLUE}To start benches:${NC}"
-            for i in "${!versions_to_install[@]}"; do
-                echo -e "  sudo -u $INSTALL_USER bash -c 'cd /home/$INSTALL_USER/${bench_names[$i]} && bench start'"
-            done
-            ;;
-            
-        3)
-            echo -e "${GREEN}Exiting. Goodbye!${NC}"
-            exit 0
-            ;;
-            
-        *)
-            echo -e "${RED}Invalid choice. Exiting.${NC}"
-            exit 1
-            ;;
-    esac
-}
-
-# Function to run the original installation
-run_original_installation() {
+# MAIN SINGLE INSTALLATION FUNCTION - COMPLETE FROM single.sh
+run_single_installation() {
     echo -e "${LIGHT_BLUE}Welcome to the ERPNext Installer...${NC}"
     echo -e "\n"
     sleep 3
@@ -661,9 +395,6 @@ run_original_installation() {
 
     check_existing_installations
 
-    #
-    # ─── OS COMPATIBILITY FOR VERSION-15/16 OR DEVELOP ─────────────────────────────────────
-    #
     if [[ "$bench_version" == "version-15" || "$bench_version" == "version-16" || "$bench_version" == "develop" ]]; then
         if [[ "$(lsb_release -si)" != "Ubuntu" && "$(lsb_release -si)" != "Debian" ]]; then
             echo -e "${RED}Your Distro is not supported for Version 15/16/Develop.${NC}"
@@ -677,9 +408,6 @@ run_original_installation() {
         fi
     fi
 
-    #
-    # ─── OS COMPATIBILITY FOR OLDER VERSIONS (version-13, version-14) ───────────────────────
-    #
     if [[ "$bench_version" != "version-15" && "$bench_version" != "version-16" && "$bench_version" != "develop" ]]; then
         if [[ "$(lsb_release -si)" != "Ubuntu" && "$(lsb_release -si)" != "Debian" ]]; then
             echo -e "${RED}Your Distro is not supported for $version_choice.${NC}"
@@ -698,9 +426,6 @@ run_original_installation() {
 
     cd "$(sudo -u $USER echo $HOME)"
 
-    #
-    # ─── SQL ROOT PASSWORD PROMPT ─────────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Now let's set some important parameters...${NC}"
     sleep 1
     echo -e "${YELLOW}We will need your required SQL root password${NC}"
@@ -709,9 +434,6 @@ run_original_installation() {
     echo -e "\n"
     sleep 1
 
-    #
-    # ─── SYSTEM PACKAGE UPDATES ────────────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Updating system packages...${NC}"
     sleep 2
     sudo apt update
@@ -719,26 +441,18 @@ run_original_installation() {
     echo -e "${GREEN}System packages updated.${NC}"
     sleep 2
 
-    #
-    # ─── PRELIMINARY PACKAGE INSTALL ──────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Installing preliminary package requirements${NC}"
     sleep 3
     sudo apt install software-properties-common git curl whiptail cron -y
 
+    os_version=$(lsb_release -rs)
     if [[ "$DISTRO" == "Ubuntu" && "$os_version" == "24.04" ]]; then
+        echo "📦 Installing Supervisor and creating default config..."
+        sudo apt update
+        sudo apt install -y supervisor
 
-    #
-    # ─── PRELIMINARY supervisor install fix ──────────────────────────────────────────────────────
-    #
-
-    echo "📦 Installing Supervisor and creating default config..."
-    sudo apt update
-    sudo apt install -y supervisor
-
-    # Create default supervisor config if missing
-    if [ ! -f /etc/supervisor/supervisord.conf ]; then
-      sudo tee /etc/supervisor/supervisord.conf > /dev/null <<'EOF'
+        if [ ! -f /etc/supervisor/supervisord.conf ]; then
+          sudo tee /etc/supervisor/supervisord.conf > /dev/null <<'EOF'
 [unix_http_server]
 file=/var/run/supervisor.sock
 chmod=0700
@@ -758,20 +472,16 @@ serverurl=unix:///var/run/supervisor.sock
 [include]
 files = /etc/supervisor/conf.d/*.conf
 EOF
+        fi
+
+        sudo systemctl enable supervisor
+        sudo systemctl restart supervisor
     fi
 
-    sudo systemctl enable supervisor
-    sudo systemctl restart supervisor
-
-    fi
-
-    #
-    # ─── PYTHON AND REDIS INSTALL ───────────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Installing python environment manager and other requirements...${NC}"
     sleep 2
 
-    py_version=$(python3 --version 2>&1 | awk '{print $2}' )
+    py_version=$(python3 --version 2>&1 | awk '{print $2}')
     py_major=$(echo "$py_version" | cut -d '.' -f 1)
     py_minor=$(echo "$py_version" | cut -d '.' -f 2)
 
@@ -799,7 +509,7 @@ EOF
         tar -xf Python-${required_python_full}.tgz && \
         cd Python-${required_python_full} && \
         ./configure --prefix=/usr/local --enable-optimizations --enable-shared LDFLAGS="-Wl,-rpath /usr/local/lib" && \
-        make -j "$(nproc )" && \
+        make -j "$(nproc)" && \
         sudo make altinstall && \
         cd .. && \
         sudo rm -rf Python-${required_python_full} && \
@@ -814,9 +524,6 @@ EOF
     sleep 2
     sudo apt install git python3-dev python3-setuptools python3-venv python3-pip redis-server -y
 
-    #
-    # ─── WKHTMLTOPDF INSTALL ───────────────────────────────────────────────────────────────
-    #
     arch=$(uname -m)
     case $arch in
         x86_64) arch="amd64" ;;
@@ -838,9 +545,6 @@ EOF
     sleep 1
     echo -e "\n"
 
-    #
-    # ─── MARIADB + DEV LIBRARIES + PKG-CONFIG ─────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Now installing MariaDB and other necessary packages...${NC}"
     sleep 2
     sudo apt install mariadb-server mariadb-client -y
@@ -884,17 +588,14 @@ EOF'
         sleep 1
     fi
 
-    #
-    # ─── NVM / NODE / YARN INSTALL ─────────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Now to install NVM, Node, npm and yarn${NC}"
     sleep 2
 
     curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash
 
     nvm_init='export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ]: # "&& \. \"$NVM_DIR/nvm.sh\""
-[ -s "$NVM_DIR/bash_completion" ]: # "&& \. \"$NVMDIR/bashcompletion\"'"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"'
 
     grep -qxF 'export NVM_DIR="$HOME/.nvm"' ~/.profile 2>/dev/null || echo "$nvm_init" >> ~/.profile
     grep -qxF 'export NVM_DIR="$HOME/.nvm"' ~/.bashrc 2>/dev/null || echo "$nvm_init" >> ~/.bashrc
@@ -903,8 +604,6 @@ EOF'
     [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
     [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
-
-    os_version=$(lsb_release -rs )
     if [[ "$bench_version" == "version-16" ]]; then
         nvm install 24
         nvm alias default 24
@@ -935,9 +634,6 @@ EOF'
         nvm use default
     fi
 
-    #
-    # ─── BENCH INSTALL ───────────────────────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Now let's install bench${NC}"
     sleep 2
 
@@ -961,9 +657,6 @@ EOF'
     echo -e "${GREEN}Bench installation complete!${NC}"
     sleep 1
 
-    #
-    # ─── NEW SITE CREATION ─────────────────────────────────────────────────────────────────
-    #
     echo -e "${YELLOW}Preparing for Production installation. This could take a minute... or two so please be patient.${NC}"
     read -p "Enter the site name (If you wish to install SSL later, please enter a FQDN): " site_name
     sleep 1
@@ -1041,28 +734,16 @@ EOF'
 
                 echo "🧹 Fixing nginx PID permissions before reload..."
 
-                # Install nginx if it's not already installed
                 if ! dpkg -s nginx >/dev/null 2>&1; then
                   echo "📦 Nginx not found. Installing it now..."
                   sudo apt update && sudo apt install -y nginx
                 fi
 
-                # Stop nginx if running
                 sudo systemctl stop nginx 2>/dev/null || true
-
-                # Clean up stale PID file
                 sudo rm -f /var/run/nginx.pid || true
-
-                # Ensure permissions on /var/run are correct
                 sudo chown root:root /var/run
-
-                # Remove default site if exists
                 sudo rm -f /etc/nginx/sites-enabled/default || true
-
-                # Start nginx now that it's installed
                 sudo systemctl start nginx
-
-                # Test nginx configuration (will fail if bench hasn't generated it yet — that's fine)
                 sudo nginx -t || true
             fi
             
@@ -1119,7 +800,7 @@ EOF'
             sleep 3
 
             #
-            # ─── ADDITIONAL APPS INSTALL SECTION ────────────────────────────────
+            # ─── ADDITIONAL APPS INSTALL SECTION ────────────────────────────────────────
             #
             echo -e "${LIGHT_BLUE}Would you like to install additional Frappe apps? (yes/no)${NC}"
             read -p "Response: " extra_apps_install
@@ -1135,7 +816,7 @@ EOF'
                     echo -e "${GREEN}Apps courtesy of awesome-frappe by Gavin D'Souza (@gavindsouza)${NC}"
                     echo -e "${GREEN}Repository: https://github.com/gavindsouza/awesome-frappe${NC}"
                     echo ""
-                    read -p "Continue with app installation? (yes/no ): " apps_confirm
+                    read -p "Continue with app installation? (yes/no): " apps_confirm
                     apps_confirm=$(echo "$apps_confirm" | tr '[:upper:]' '[:lower:]')
                     
                     if [[ "$apps_confirm" != "yes" && "$apps_confirm" != "y" ]]; then
@@ -1162,17 +843,17 @@ EOF'
                         else
                             mapfile -t raw_entries < <(
                                 {
-                                    grep -oE '\[([^]]+ )\]\(https://github\.com/[^ )]*\)' "$tmp_dir/README.md" 2>/dev/null || true
-                                    grep -oE '\[([^]]+)\]\(https://frappecloud\.com/marketplace/[^ )]*\)' "$tmp_dir/README.md" 2>/dev/null || true
-                                    grep -oE '\[([^]]+)\]\(https://frappe\.io/[^ )]*\)' "$tmp_dir/README.md" 2>/dev/null || true
+                                    grep -oE '\[([^]]+)\]\(https://github\.com/[^)]*\)' "$tmp_dir/README.md" 2>/dev/null || true
+                                    grep -oE '\[([^]]+)\]\(https://frappecloud\.com/marketplace/[^)]*\)' "$tmp_dir/README.md" 2>/dev/null || true
+                                    grep -oE '\[([^]]+)\]\(https://frappe\.io/[^)]*\)' "$tmp_dir/README.md" 2>/dev/null || true
                                     
-                                    echo "[Frappe HR](https://github.com/frappe/hrms.git )"
-                                    echo "[Frappe LMS](https://github.com/frappe/lms.git )"
-                                    echo "[Frappe CRM](https://github.com/frappe/crm.git )"
-                                    echo "[Frappe Helpdesk](https://github.com/frappe/helpdesk.git )"
-                                    echo "[Frappe Builder](https://github.com/frappe/builder.git )"
-                                    echo "[Frappe Drive](https://github.com/frappe/drive.git )"
-                                    echo "[Frappe Gameplan](https://github.com/frappe/gameplan.git )"
+                                    echo "[Frappe HR](https://github.com/frappe/hrms.git)"
+                                    echo "[Frappe LMS](https://github.com/frappe/lms.git)"
+                                    echo "[Frappe CRM](https://github.com/frappe/crm.git)"
+                                    echo "[Frappe Helpdesk](https://github.com/frappe/helpdesk.git)"
+                                    echo "[Frappe Builder](https://github.com/frappe/builder.git)"
+                                    echo "[Frappe Drive](https://github.com/frappe/drive.git)"
+                                    echo "[Frappe Gameplan](https://github.com/frappe/gameplan.git)"
                                 } | sort -u
                             )
 
@@ -1198,7 +879,6 @@ EOF'
                                         echo -ne "\r${LIGHT_BLUE}Progress: $current_app/$total_apps apps checked...${NC}"
                                         
                                         display_name=$(echo "$entry" | sed -E 's/\[([^]]+)\]\(.*/\1/')
-                                        
                                         url=$(echo "$entry" | sed -E 's/.*\(([^)]+)\).*/\1/')
                                         
                                         repo_url=""
@@ -1209,44 +889,44 @@ EOF'
                                             if [[ ! "$repo_url" =~ \.git$ ]]; then
                                                 repo_url="${repo_url}.git"
                                             fi
-                                            repo_name=$(basename "$repo_url" .git )
+                                            repo_name=$(basename "$repo_url" .git)
                                         elif [[ "$url" =~ ^https://frappecloud\.com/marketplace/ ]] || [[ "$url" =~ ^https://github\.com/frappe/ ]]; then
                                             case "$display_name" in
-                                                "Frappe HR"|"HRMS" )
+                                                "Frappe HR"|"HRMS")
                                                     repo_url="https://github.com/frappe/hrms.git"
                                                     repo_name="hrms"
                                                     ;;
-                                                "Frappe LMS" )
+                                                "Frappe LMS")
                                                     repo_url="https://github.com/frappe/lms.git"
                                                     repo_name="lms"
                                                     ;;
-                                                "Frappe CRM" )
+                                                "Frappe CRM")
                                                     repo_url="https://github.com/frappe/crm.git"
                                                     repo_name="crm"
                                                     ;;
-                                                "Frappe Helpdesk" )
+                                                "Frappe Helpdesk")
                                                     repo_url="https://github.com/frappe/helpdesk.git"
                                                     repo_name="helpdesk"
                                                     ;;
-                                                "Frappe Builder" )
+                                                "Frappe Builder")
                                                     repo_url="https://github.com/frappe/builder.git"
                                                     repo_name="builder"
                                                     ;;
-                                                "Frappe Drive" )
+                                                "Frappe Drive")
                                                     repo_url="https://github.com/frappe/drive.git"
                                                     repo_name="drive"
                                                     ;;
-                                                "Frappe Gameplan" )
+                                                "Frappe Gameplan")
                                                     repo_url="https://github.com/frappe/gameplan.git"
                                                     repo_name="gameplan"
                                                     ;;
-                                                * )
+                                                *)
                                                     if [[ "$url" =~ ^https://github\.com/ ]]; then
                                                         repo_url="$url"
                                                         if [[ ! "$repo_url" =~ \.git$ ]]; then
                                                             repo_url="${repo_url}.git"
                                                         fi
-                                                        repo_name=$(basename "$repo_url" .git )
+                                                        repo_name=$(basename "$repo_url" .git)
                                                     else
                                                         continue
                                                     fi
@@ -1281,7 +961,6 @@ EOF'
                                     
                                     for entry in "${raw_entries[@]}"; do
                                         display_name=$(echo "$entry" | sed -E 's/\[([^]]+)\]\(.*/\1/')
-                                        
                                         url=$(echo "$entry" | sed -E 's/.*\(([^)]+)\).*/\1/')
                                         
                                         repo_url=""
@@ -1292,44 +971,44 @@ EOF'
                                             if [[ ! "$repo_url" =~ \.git$ ]]; then
                                                 repo_url="${repo_url}.git"
                                             fi
-                                            repo_name=$(basename "$repo_url" .git )
+                                            repo_name=$(basename "$repo_url" .git)
                                         elif [[ "$url" =~ ^https://frappecloud\.com/marketplace/ ]] || [[ "$url" =~ ^https://github\.com/frappe/ ]]; then
                                             case "$display_name" in
-                                                "Frappe HR"|"HRMS" )
+                                                "Frappe HR"|"HRMS")
                                                     repo_url="https://github.com/frappe/hrms.git"
                                                     repo_name="hrms"
                                                     ;;
-                                                "Frappe LMS" )
+                                                "Frappe LMS")
                                                     repo_url="https://github.com/frappe/lms.git"
                                                     repo_name="lms"
                                                     ;;
-                                                "Frappe CRM" )
+                                                "Frappe CRM")
                                                     repo_url="https://github.com/frappe/crm.git"
                                                     repo_name="crm"
                                                     ;;
-                                                "Frappe Helpdesk" )
+                                                "Frappe Helpdesk")
                                                     repo_url="https://github.com/frappe/helpdesk.git"
                                                     repo_name="helpdesk"
                                                     ;;
-                                                "Frappe Builder" )
+                                                "Frappe Builder")
                                                     repo_url="https://github.com/frappe/builder.git"
                                                     repo_name="builder"
                                                     ;;
-                                                "Frappe Drive" )
+                                                "Frappe Drive")
                                                     repo_url="https://github.com/frappe/drive.git"
                                                     repo_name="drive"
                                                     ;;
-                                                "Frappe Gameplan" )
+                                                "Frappe Gameplan")
                                                     repo_url="https://github.com/frappe/gameplan.git"
                                                     repo_name="gameplan"
                                                     ;;
-                                                * )
+                                                *)
                                                     if [[ "$url" =~ ^https://github\.com/ ]]; then
                                                         repo_url="$url"
                                                         if [[ ! "$repo_url" =~ \.git$ ]]; then
                                                             repo_url="${repo_url}.git"
                                                         fi
-                                                        repo_name=$(basename "$repo_url" .git )
+                                                        repo_name=$(basename "$repo_url" .git)
                                                     else
                                                         continue
                                                     fi
@@ -1348,8 +1027,7 @@ EOF'
                                         url_array+=("$repo_url")
                                     done
                                     
-                                    echo -e "${GREEN}
-✓ Found ${#display_names[@]} apps available for $bench_version${NC}"
+                                    echo -e "${GREEN}✓ Found ${#display_names[@]} apps available for $bench_version${NC}"
                                 fi
 
                                 declare -a unique_display_names=()
@@ -1484,7 +1162,7 @@ EOF'
 
                                             echo -e "${YELLOW}Step 1/2: Downloading app...${NC}"
                                             
-                                            echo -e "${LIGHT_BLUE}🔄 Detecting optimal branch for $selected_repo...${NC}"
+                                            echo -e "${LIGHT_BLUE}📄 Detecting optimal branch for $selected_repo...${NC}"
                                             best_branch=$(detect_best_branch "$selected_url" "$bench_version" "$selected_repo")
                                             
                                             if [[ -z "$best_branch" ]]; then
@@ -1498,7 +1176,7 @@ EOF'
                                             
                                             download_success=false
                                             
-                                            echo -e "${YELLOW}🔽 Downloading from branch '$best_branch'...${NC}"
+                                            echo -e "${YELLOW}📽 Downloading from branch '$best_branch'...${NC}"
                                             if bench get-app "$selected_url" --branch "$best_branch" --skip-assets 2>/tmp/bench_error_$.log; then
                                                 download_success=true
                                                 echo -e "${GREEN}✅ Successfully downloaded \"$selected_display_name\" from branch '$best_branch'.${NC}"
@@ -1531,7 +1209,7 @@ EOF'
                                                         fi
                                                     else
                                                         echo -e "${YELLOW}⚠ Could not extract name from setup.py, trying alternatives...${NC}"
-                                                        fi
+                                                    fi
                                                 fi
                                                 
                                                 if [[ "$app_installed" == false ]]; then
@@ -1614,9 +1292,9 @@ EOF'
                                             echo -e "\n${LIGHT_BLUE}────────────────────────────────────────${NC}\n"
                                         done
 
-                                        echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
+                                        echo -e "${GREEN}╔═══════════════════════════════════════╗${NC}"
                                         echo -e "${GREEN}║           Installation Summary       ║${NC}"
-                                        echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
+                                        echo -e "${GREEN}╚═══════════════════════════════════════╝${NC}"
                                         
                                         if [ "${#successful_installations[@]}" -gt 0 ]; then
                                             echo -e "${GREEN}✓ Successfully installed ${#successful_installations[@]} apps:${NC}"
@@ -1643,7 +1321,6 @@ EOF'
                                             sudo supervisorctl restart all 2>/dev/null || true
                                             echo -e "${GREEN}Services restarted successfully.${NC}"
                                         fi
-                                        fi
                                     fi
                                 fi
                             fi
@@ -1651,13 +1328,13 @@ EOF'
                     fi
                 fi
                 ;;
-                *)
-                    echo -e "${RED}Skipping additional apps installation.${NC}"
-                    ;;
-            esac
+            *)
+                echo -e "${RED}Skipping additional apps installation.${NC}"
+                ;;
+        esac
 
             #
-            # ─── SSL SECTION ────────────────────────────────────────────────────────────────
+            # ─── SSL SECTION ────────────────────────────────────────────────────────────
             #
             echo -e "${YELLOW}Would you like to install SSL? (yes/no)${NC}"
             read -p "Response: " continue_ssl
@@ -1714,13 +1391,12 @@ EOF'
             echo -e "Congratulations! You have successfully installed ERPNext $version_choice."
             echo -e "You can start using your new ERPNext installation by visiting https://$site_name"
             echo -e "(if you have enabled SSL and used a Fully Qualified Domain Name"
-            echo -e "during installation ) or http://$server_ip to begin."
+            echo -e "during installation) or http://$server_ip to begin."
             echo -e "Install additional apps as required. Visit https://docs.erpnext.com for Documentation."
             echo -e "Enjoy using ERPNext!"
             echo -e "--------------------------------------------------------------------------------${NC}"
             ;;
-        * )
-
+        *)
             echo -e "${YELLOW}Getting your site ready for development...${NC}"
             sleep 2
             source ~/.profile
@@ -1742,6 +1418,146 @@ EOF'
             echo -e "Install additional apps as required. Visit https://frappeframework.com for Developer Documentation."
             echo -e "Enjoy development with Frappe!"
             echo -e "-----------------------------------------------------------------------------------------------${NC}"
+            ;;
+    esac
+}
+
+# Main menu function
+main_installation() {
+    clear
+    echo -e "${LIGHT_BLUE}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${LIGHT_BLUE}║        ERPNext Universal Installation Manager           ║${NC}"
+    echo -e "${LIGHT_BLUE}║              Production & Development Ready              ║${NC}"
+    echo -e "${LIGHT_BLUE}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    echo -e "${YELLOW}Choose installation mode:${NC}"
+    echo ""
+    echo -e "${GREEN}1.${NC} Single ERPNext Installation ${LIGHT_BLUE}(Recommended for Production)${NC}"
+    echo -e "   • Full production setup with SSL support"
+    echo -e "   • Complete system configuration"
+    echo -e "   • Additional apps installation available"
+    echo ""
+    echo -e "${YELLOW}2.${NC} Multiple ERPNext Versions ${RED}(Development Only)${NC}"
+    echo -e "   • Install multiple versions side-by-side"
+    echo -e "   • Different bench folders for each version"
+    echo -e "   • NOT recommended for production"
+    echo ""
+    echo -e "${RED}3.${NC} Exit"
+    echo ""
+    
+    read -p "Enter your choice (1-3): " mode_choice
+    
+    case $mode_choice in
+        1)
+            clear
+            echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+            echo -e "${GREEN}     Starting Single ERPNext Installation            ${NC}"
+            echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+            echo ""
+            run_single_installation
+            ;;
+            
+        2)
+            clear
+            echo ""
+            echo -e "${RED}╔═══════════════════════════════════════════════════════╗${NC}"
+            echo -e "${RED}║     ⚠️  MULTIPLE INSTALLATIONS WARNING ⚠️           ║${NC}"
+            echo -e "${RED}╚═══════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "${YELLOW}Multiple installations on the same server:${NC}"
+            echo -e "${RED}  • Recommended for DEVELOPMENT ONLY${NC}"
+            echo -e "${RED}  • NOT suitable for production environments${NC}"
+            echo -e "${RED}  • May cause port conflicts${NC}"
+            echo -e "${RED}  • May cause dependency conflicts${NC}"
+            echo -e "${RED}  • May cause supervisor conflicts${NC}"
+            echo -e "${RED}  • Requires careful manual configuration${NC}"
+            echo ""
+            echo -e "${LIGHT_BLUE}Best practices for multiple installations:${NC}"
+            echo -e "${GREEN}  1. Use DIFFERENT bench folder names (e.g., frappe-bench-13, frappe-bench-14)${NC}"
+            echo -e "${GREEN}  2. Use DIFFERENT site names (e.g., site13.local, site14.local)${NC}"
+            echo -e "${GREEN}  3. Run each installation SEPARATELY${NC}"
+            echo -e "${GREEN}  4. Consider using Docker containers instead${NC}"
+            echo ""
+            
+            read -p "Do you understand these risks and want to continue? (yes/no): " multi_confirm
+            multi_confirm=$(echo "$multi_confirm" | tr '[:upper:]' '[:lower:]')
+            
+            if [[ "$multi_confirm" != "yes" && "$multi_confirm" != "y" ]]; then
+                echo -e "${GREEN}Installation cancelled. Good choice!${NC}"
+                echo -e "${YELLOW}Consider using option 1 for production installations.${NC}"
+                exit 0
+            fi
+            
+            echo ""
+            echo -e "${YELLOW}═══════════════════════════════════════════════════════${NC}"
+            echo -e "${YELLOW}     Multiple Installations Guide                     ${NC}"
+            echo -e "${YELLOW}═══════════════════════════════════════════════════════${NC}"
+            echo ""
+            echo -e "${LIGHT_BLUE}How to install multiple versions:${NC}"
+            echo ""
+            echo -e "${GREEN}Step 1:${NC} Run this script and select option 1"
+            echo -e "${GREEN}Step 2:${NC} Choose your first ERPNext version"
+            echo -e "${GREEN}Step 3:${NC} Use a unique bench folder name (e.g., frappe-bench-14)"
+            echo -e "${GREEN}Step 4:${NC} Complete the installation"
+            echo -e "${GREEN}Step 5:${NC} Run this script AGAIN for the next version"
+            echo -e "${GREEN}Step 6:${NC} Use a DIFFERENT bench folder name (e.g., frappe-bench-15)"
+            echo ""
+            echo -e "${YELLOW}Example for 2 installations:${NC}"
+            echo -e "  ${LIGHT_BLUE}Installation 1:${NC}"
+            echo -e "    • Version: 14"
+            echo -e "    • Bench folder: frappe-bench-14"
+            echo -e "    • Site name: site14.local"
+            echo ""
+            echo -e "  ${LIGHT_BLUE}Installation 2:${NC}"
+            echo -e "    • Version: 15"
+            echo -e "    • Bench folder: frappe-bench-15"
+            echo -e "    • Site name: site15.local"
+            echo ""
+            echo -e "${RED}IMPORTANT:${NC} Each installation runs through option 1 separately!"
+            echo ""
+            
+            read -p "Press Enter to start your first installation..." pause
+            
+            clear
+            echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+            echo -e "${GREEN}     Starting First Installation                      ${NC}"
+            echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+            echo ""
+            echo -e "${YELLOW}Remember to use a unique bench folder name!${NC}"
+            echo ""
+            
+            run_single_installation
+            
+            echo ""
+            echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+            echo -e "${GREEN}     First Installation Completed!                    ${NC}"
+            echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+            echo ""
+            echo -e "${YELLOW}To install another version:${NC}"
+            echo -e "${GREEN}1. Run this script again: ${LIGHT_BLUE}bash multi.sh${NC}"
+            echo -e "${GREEN}2. Choose option 1 (Single Installation)${NC}"
+            echo -e "${GREEN}3. Select a different ERPNext version${NC}"
+            echo -e "${GREEN}4. Use a DIFFERENT bench folder name${NC}"
+            echo ""
+            echo -e "${LIGHT_BLUE}Your installations:${NC}"
+            echo -e "  • Bench: $bench_name"
+            echo -e "  • Site: $site_name"
+            echo ""
+            ;;
+            
+        3)
+            clear
+            echo -e "${GREEN}Thank you for using ERPNext Installation Manager!${NC}"
+            echo -e "${LIGHT_BLUE}Goodbye!${NC}"
+            exit 0
+            ;;
+            
+        *)
+            clear
+            echo -e "${RED}Invalid choice!${NC}"
+            echo -e "${YELLOW}Please run the script again and choose 1, 2, or 3.${NC}"
+            exit 1
             ;;
     esac
 }
