@@ -394,10 +394,15 @@ run_single_installation() {
     sleep 2
 
     # Select or create user for installation
-    select_or_create_user || {
+    echo -e "${YELLOW}Selecting user for installation...${NC}"
+    select_or_create_user
+    if [[ $? -ne 0 ]]; then
         echo -e "${RED}User selection failed. Exiting.${NC}"
         exit 1
-    }
+    fi
+    
+    echo -e "${GREEN}✓ User selected: $INSTALL_USER${NC}"
+    echo -e "${GREEN}✓ Home directory: $INSTALL_HOME${NC}"
 
     check_existing_installations
 
@@ -428,7 +433,7 @@ run_single_installation() {
         fi
     fi
 
-    check_os
+# OS check will be done during installation
 
     cd "$(sudo -u "$INSTALL_USER" echo "$INSTALL_HOME")"
 
