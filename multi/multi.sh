@@ -625,47 +625,52 @@ EOF'
     echo -e "${YELLOW}Now to install NVM, Node, npm and yarn${NC}"
     sleep 2
 
-    curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash
+    echo -e "${YELLOW}Installing NVM and Node.js for user: $INSTALL_USER${NC}"
+    
+    # Install NVM for the target user
+    sudo -u "$INSTALL_USER" bash -c 'curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash'
 
     nvm_init='export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"'
 
-    grep -qxF 'export NVM_DIR="$HOME/.nvm"' ~/.profile 2>/dev/null || echo "$nvm_init" >> ~/.profile
-    grep -qxF 'export NVM_DIR="$HOME/.nvm"' ~/.bashrc 2>/dev/null || echo "$nvm_init" >> ~/.bashrc
+    # Add NVM to target user's profile
+    sudo -u "$INSTALL_USER" bash -c "grep -qxF 'export NVM_DIR=\"$HOME/.nvm\"' ~/.profile 2>/dev/null || echo '$nvm_init' >> ~/.profile"
+    sudo -u "$INSTALL_USER" bash -c "grep -qxF 'export NVM_DIR=\"$HOME/.nvm\"' ~/.bashrc 2>/dev/null || echo '$nvm_init' >> ~/.bashrc"
 
-    export NVM_DIR="$HOME/.nvm"
-    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+    # Set up NVM environment for target user
+    sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"'
 
+    # Install Node.js for the target user based on version
     if [[ "$bench_version" == "version-16" ]]; then
-        nvm install 24
-        nvm alias default 24
+        sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && nvm install 24 && nvm alias default 24'
         node_version="24"
     elif [[ "$DISTRO" == "Ubuntu" && "$os_version" == "24.04" ]]; then
-        nvm install 20
-        nvm alias default 20
+        sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && nvm install 20 && nvm alias default 20'
         node_version="20"
     elif [[ "$bench_version" == "version-15" || "$bench_version" == "develop" ]]; then
-        nvm install 18
-        nvm alias default 18
+        sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && nvm install 18 && nvm alias default 18'
         node_version="18"
     else
-        nvm install 16
-        nvm alias default 16
+        sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && nvm install 16 && nvm alias default 16'
         node_version="16"
     fi
 
-    npm install -g yarn@1.22.19
+    # Install yarn for the target user
+    sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && npm install -g yarn@1.22.19'
 
     echo -e "${GREEN}nvm and Node (v${node_version}) have been installed and aliased as default.${NC}"
     echo -e "${GREEN}Yarn v$(yarn --version) (Classic) installed globally.${NC}"
     sleep 2
 
     if [[ -z "$py_version" ]] || [[ "$py_major" -lt 3 ]] || [[ "$py_major" -eq 3 && "$py_minor" -lt "$required_python_minor" ]]; then
-        python3."${required_python_minor}" -m venv "$USER"
-        source "$USER/bin/activate"
-        nvm use default
+        echo -e "${YELLOW}Setting up Python virtual environment for $INSTALL_USER...${NC}"
+        sudo -u "$INSTALL_USER" bash -c "
+            if [[ ! -d '$INSTALL_HOME/venv' ]]; then
+                python3.${required_python_minor} -m venv '$INSTALL_HOME/venv'
+            fi
+        "
+        echo -e "${GREEN}✓ Python virtual environment created for $INSTALL_USER${NC}"
     fi
 
     echo -e "${YELLOW}Now let's install bench${NC}"
@@ -679,17 +684,27 @@ EOF'
     sudo apt install python3-pip -y
     sudo pip3 install frappe-bench
 
-    export NVM_DIR="$HOME/.nvm"
-    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    nvm use default
-
     echo -e "${YELLOW}Initialising bench in $bench_name folder.${NC}"
     echo -e "${LIGHT_BLUE}If you get a restart failed, don't worry, we will resolve that later.${NC}"
     read -p "Enter a name for your bench folder (default: frappe-bench): " bench_name
     bench_name=${bench_name:-frappe-bench}
     
-    # Initialize bench as the selected user
-    sudo -u "$INSTALL_USER" bash -c "cd '$INSTALL_HOME' && bench init '$bench_name' --version '$bench_version' --verbose"
+    # Initialize bench with proper environment for the target user
+    echo -e "${YELLOW}Creating bench with Node.js and Python environment for $INSTALL_USER...${NC}"
+    sudo -u "$INSTALL_USER" bash -c "
+        export NVM_DIR=\"\$HOME/.nvm\"
+        [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
+        [ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"
+        nvm use default
+        
+        # Activate virtual environment if it exists
+        if [[ -f '$INSTALL_HOME/venv/bin/activate' ]]; then
+            source '$INSTALL_HOME/venv/bin/activate'
+        fi
+        
+        cd '$INSTALL_HOME'
+        bench init '$bench_name' --version '$bench_version' --verbose
+    "
     echo -e "${GREEN}Bench installation complete!${NC}"
     sleep 1
 
