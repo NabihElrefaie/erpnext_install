@@ -48,13 +48,13 @@ A comprehensive bash script for installing multiple ERPNext versions on a single
 ```bash
 # Clone the repository
 git clone https://github.com/NabihElrefaie/erpnext_install.git
-cd erpnext_install
+cd erpnext_install/multi
 
 # Make executable
 chmod +x multi.sh
 
 # Run the installer
-sudo ./multi.sh
+source multi.sh
 ```
 
 ### 🔧 Installation Modes
@@ -82,7 +82,7 @@ sudo apt install curl wget git -y
 ### Step 2: Run Installer
 ```bash
 # Execute the installation script
-sudo ./multi.sh
+source  multi.sh
 
 # Follow the interactive prompts
 # Choose installation mode
