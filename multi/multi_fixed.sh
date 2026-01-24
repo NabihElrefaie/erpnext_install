@@ -1671,4 +1671,3 @@ main_installation() {
 
 # Run main function
 main_installation
-

@@ -374,8 +374,24 @@ run_single_installation() {
     done
 
     echo -e "${GREEN}You have selected $version_choice for installation.${NC}"
-    echo -e "${GREEN}Proceeding with the installation of $version_choice.${NC}"
-    sleep 1
+    echo -e "${LIGHT_BLUE}Do you wish to continue? (yes/no)${NC}"
+    read -p "Response: " continue_install
+    continue_install=$(echo "$continue_install" | tr '[:upper:]' '[:lower:]')
+
+    while [[ "$continue_install" != "yes" && "$continue_install" != "y" && "$continue_install" != "no" && "$continue_install" != "n" ]]; do
+        echo -e "${RED}Invalid response. Please answer with 'yes' or 'no'.${NC}"
+        echo -e "${LIGHT_BLUE}Do you wish to continue with the installation of $version_choice? (yes/no)${NC}"
+        read -p "Response: " continue_install
+        continue_install=$(echo "$continue_install" | tr '[:upper:]' '[:lower:]')
+    done
+
+    if [[ "$continue_install" == "no" || "$continue_install" == "n" ]]; then
+        echo -e "${RED}Installation aborted by user.${NC}"
+        exit 0
+    else
+        echo -e "${GREEN}Proceeding with the installation of $version_choice.${NC}"
+    fi
+    sleep 2
 
 # Pre-installation information collection
     echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
@@ -692,21 +708,11 @@ EOF'
         node_version="16"
     fi
 
-    # Install yarn for the target user AND system-wide
-    # Install for target user
+    # Install yarn for the target user
     sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && npm install -g yarn@1.22.19'
-    
-    # Also install system-wide yarn for sudo operations
-    sudo npm install -g yarn@1.22.19 || echo "System-wide yarn installation skipped"
 
     echo -e "${GREEN}nvm and Node (v${node_version}) have been installed and aliased as default.${NC}"
-    # Check yarn version
-    if sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && yarn --version' 2>/dev/null; then
-        yarn_version=$(sudo -u "$INSTALL_USER" bash -c 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && yarn --version')
-        echo -e "${GREEN}Yarn v$yarn_version (Classic) installed globally for $INSTALL_USER.${NC}"
-    else
-        echo -e "${YELLOW}Yarn not found for $INSTALL_USER, using system-wide yarn.${NC}"
-    fi
+    echo -e "${GREEN}Yarn v$(yarn --version) (Classic) installed globally.${NC}"
     sleep 2
 
     if [[ -z "$py_version" ]] || [[ "$py_major" -lt 3 ]] || [[ "$py_major" -eq 3 && "$py_minor" -lt "$required_python_minor" ]]; then
@@ -1669,6 +1675,4 @@ main_installation() {
     esac
 }
 
-# Run main function
 main_installation
-
