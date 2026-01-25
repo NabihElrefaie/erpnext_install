@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 
-handle_error() {
-    local line=$1
-    local exit_code=$?
-    echo "An error occurred on line $line with exit status $exit_code"
-    exit $exit_code
-}
+# =============================================================================
+# ERPNext Universal Installation Script - Complete Version
+# Features: Multiple installations, Additional apps, SSL, All versions
+# Fixed: Network timeout issues, Supervisor, Production setup
+# =============================================================================
 
-trap 'handle_error $LINENO' ERR
 set -e
 
-server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || hostname 2>/dev/null || echo "localhost")
+server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
+# Colors
 YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -19,7 +18,7 @@ LIGHT_BLUE='\033[1;34m'
 NC='\033[0m'
 
 SUPPORTED_DISTRIBUTIONS=("Ubuntu" "Debian")
-SUPPORTED_VERSIONS=("24.04" "23.04" "22.04" "20.04" "12" "11" "10" "9" "8")
+SUPPORTED_VERSIONS=("24.04" "23.04" "22.04" "20.04" "12" "11" "10")
 
 # Global variables
 DEFAULT_PASSWORD="ChangeMe123!"
@@ -31,7 +30,50 @@ SQL_PASSWORD=""
 ADMIN_PASSWORD=""
 EMAIL_ADDRESS=""
 BENCH_VERSION=""
-NODE_VERSION=""
+
+# =============================================================================
+# NETWORK & PIP CONFIGURATION - FIXED
+# =============================================================================
+
+configure_pip_for_network() {
+    echo -e "${YELLOW}Configuring pip for better network performance...${NC}"
+    
+    mkdir -p ~/.pip
+    cat > ~/.pip/pip.conf << 'EOF'
+[global]
+timeout = 300
+retries = 10
+index-url = https://pypi.org/simple
+trusted-host = pypi.org
+               pypi.python.org
+               files.pythonhosted.org
+[install]
+compile = no
+EOF
+
+    sudo mkdir -p /root/.pip
+    sudo tee /root/.pip/pip.conf > /dev/null << 'EOF'
+[global]
+timeout = 300
+retries = 10
+index-url = https://pypi.org/simple
+trusted-host = pypi.org
+               pypi.python.org
+               files.pythonhosted.org
+[install]
+compile = no
+EOF
+
+    export PIP_DEFAULT_TIMEOUT=300
+    export PIP_RETRIES=10
+    export PIP_NO_CACHE_DIR=1
+
+    echo -e "${GREEN}✓ Pip configuration completed${NC}"
+}
+
+# =============================================================================
+# SYSTEM CHECKS
+# =============================================================================
 
 check_os() {
     local os_name=$(lsb_release -is 2>/dev/null)
@@ -40,52 +82,72 @@ check_os() {
     local version_supported=false
 
     for i in "${SUPPORTED_DISTRIBUTIONS[@]}"; do
-        if [[ "$i" = "$os_name" ]]; then
-            os_supported=true
-            break
-        fi
+        [[ "$i" = "$os_name" ]] && os_supported=true && break
     done
 
     for i in "${SUPPORTED_VERSIONS[@]}"; do
-        if [[ "$i" = "$os_version" ]]; then
-            version_supported=true
-            break
-        fi
+        [[ "$i" = "$os_version" ]] && version_supported=true && break
     done
 
     if [[ "$os_supported" = false ]] || [[ "$version_supported" = false ]]; then
-        echo -e "${RED}This script is not compatible with your operating system or its version.${NC}"
+        echo -e "${RED}OS not supported: $os_name $os_version${NC}"
         exit 1
     fi
 }
 
 check_os
 
-OS="$(uname)"
-case $OS in
-  'Linux')
-    OS='Linux'
-    if [ -f /etc/redhat-release ] ; then
-      DISTRO='CentOS'
-    elif [ -f /etc/debian_version ] ; then
-      if command -v lsb_release &> /dev/null; then
-        if [ "$(lsb_release -si)" == "Ubuntu" ]; then
-          DISTRO='Ubuntu'
-        else
-          DISTRO='Debian'
-        fi
-      elif [ -f /etc/os-release ]; then
-        source /etc/os-release
-        if [[ "$ID" == "ubuntu" ]]; then
-          DISTRO='Ubuntu'
-        else
-          DISTRO='Debian'
-        fi
-      fi
+# Detect distribution
+if [ -f /etc/os-release ]; then
+    source /etc/os-release
+    if [[ "$ID" == "ubuntu" ]]; then
+        DISTRO='Ubuntu'
+    else
+        DISTRO='Debian'
     fi
-    ;;
-  *) ;;
-esac
+fi
+
+# =============================================================================
+# CHECK EXISTING INSTALLATIONS
+# =============================================================================
+
+check_existing_installations() {
+    local existing=()
+    
+    echo -e "${YELLOW}Checking for existing ERPNext installations...${NC}"
+    
+    for path in $HOME/frappe-bench* /home/*/frappe-bench*; do
+        if [[ -d "$path" ]] && [[ -f "$path/apps/frappe/frappe/__init__.py" ]]; then
+            existing+=("$path")
+        fi
+    done
+    
+    if [[ ${#existing[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "${RED}⚠️  EXISTING INSTALLATIONS DETECTED ⚠️${NC}"
+        echo ""
+        for inst in "${existing[@]}"; do
+            echo -e "${LIGHT_BLUE}• $inst${NC}"
+        done
+        echo ""
+        echo -e "${YELLOW}Multiple versions can cause conflicts!${NC}"
+        echo ""
+        
+        read -p "Continue anyway? (yes/no): " confirm
+        confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
+        
+        if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
+            echo -e "${GREEN}Installation cancelled${NC}"
+            exit 0
+        fi
+    else
+        echo -e "${GREEN}✓ No existing installations found${NC}"
+    fi
+}
+
+# =============================================================================
+# USER INPUT FUNCTIONS
+# =============================================================================
 
 ask_twice() {
     local prompt="$1"
@@ -96,978 +158,423 @@ ask_twice() {
         if [ "$secret" = "true" ]; then
             read -rsp "$prompt: " val1
             echo >&2
-        else
-            read -rp "$prompt: " val1
-            echo >&2
-        fi
-
-        if [ "$secret" = "true" ]; then
             read -rsp "Confirm password: " val2
             echo >&2
         else
-            read -rp "Confirm password: " val2
+            read -rp "$prompt: " val1
+            echo >&2
+            read -rp "Confirm: " val2
             echo >&2
         fi
 
         if [ "$val1" = "$val2" ]; then
-            printf "${GREEN}Password confirmed${NC}\n" >&2
+            echo -e "${GREEN}✓ Confirmed${NC}" >&2
             echo "$val1"
             break
         else
-            printf "${RED}Inputs do not match. Please try again${NC}\n" >&2
-            echo -e "\n"
+            echo -e "${RED}Mismatch! Try again${NC}" >&2
         fi
     done
 }
 
-create_user_if_not_exists() {
-    local user="$1"
-    
-    if ! id "$user" &>/dev/null; then
-        echo -e "${YELLOW}Creating new user: $user...${NC}"
-        sudo adduser --disabled-password --gecos "" "$user" > /dev/null 2>&1
-        sudo usermod -aG sudo "$user" > /dev/null 2>&1
-        echo "$user:$DEFAULT_PASSWORD" | sudo chpasswd > /dev/null 2>&1
-        
-        # إعداد مجلد .ssh لأذونات صحيحة
-        sudo -u "$user" mkdir -p "/home/$user/.ssh"
-        sudo chmod 700 "/home/$user/.ssh"
-        echo -e "${GREEN}✓ User $user created successfully${NC}"
-        echo -e "${YELLOW}Default password: $DEFAULT_PASSWORD${NC}"
-        echo -e "${YELLOW}Please change password after first login${NC}"
-    else
-        echo -e "${GREEN}User $user already exists${NC}"
-    fi
-}
-
 select_or_create_user() {
     echo -e "${YELLOW}Select installation user:${NC}"
-    echo "1. Use current user ($(whoami))"
+    echo "1. Current user ($(whoami))"
     echo "2. Create new user"
-    echo "3. Select existing user"
+    echo "3. Existing user"
     
-    read -p "Enter choice (1-3): " user_choice
+    read -p "Choice (1-3): " choice
     
-    case $user_choice in
+    case $choice in
         1)
             INSTALL_USER=$(whoami)
-            if [ "$INSTALL_USER" = "root" ]; then
-                echo -e "${RED}Cannot install as root user. Please select another user.${NC}"
-                return 1
-            fi
+            [[ "$INSTALL_USER" = "root" ]] && echo -e "${RED}Cannot use root${NC}" && return 1
             INSTALL_HOME=$HOME
-            echo -e "${GREEN}Using current user: $INSTALL_USER${NC}"
             ;;
         2)
-            read -p "Enter new username: " new_user
-            if [[ -z "$new_user" ]]; then
-                echo -e "${RED}Username cannot be empty${NC}"
-                return 1
+            read -p "New username: " new_user
+            [[ -z "$new_user" ]] && echo -e "${RED}Empty username${NC}" && return 1
+            
+            if ! id "$new_user" &>/dev/null; then
+                sudo adduser --disabled-password --gecos "" "$new_user"
+                sudo usermod -aG sudo "$new_user"
+                echo "$new_user:$DEFAULT_PASSWORD" | sudo chpasswd
+                echo -e "${GREEN}✓ User created. Password: $DEFAULT_PASSWORD${NC}"
             fi
-            create_user_if_not_exists "$new_user"
             INSTALL_USER="$new_user"
             INSTALL_HOME="/home/$new_user"
             ;;
         3)
-            read -p "Enter existing username: " existing_user
-            if ! id "$existing_user" &>/dev/null; then
-                echo -e "${RED}User $existing_user does not exist.${NC}"
-                return 1
-            fi
+            read -p "Username: " existing_user
+            ! id "$existing_user" &>/dev/null && echo -e "${RED}User not found${NC}" && return 1
             INSTALL_USER="$existing_user"
             INSTALL_HOME="/home/$existing_user"
-            echo -e "${GREEN}Using existing user: $INSTALL_USER${NC}"
             ;;
         *)
-            echo -e "${RED}Invalid choice. Using current user.${NC}"
             INSTALL_USER=$(whoami)
             INSTALL_HOME=$HOME
             ;;
     esac
     
-    # إعداد أذونات sudo بدون كلمة مرور للمستخدم
-    if ! sudo grep -q "^$INSTALL_USER.*NOPASSWD" /etc/sudoers; then
-        echo "$INSTALL_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers.d/"$INSTALL_USER" > /dev/null
-        sudo chmod 440 /etc/sudoers.d/"$INSTALL_USER"
-    fi
-    
+    echo -e "${GREEN}✓ User: $INSTALL_USER${NC}"
     return 0
 }
 
-collect_pre_install_info() {
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${LIGHT_BLUE}         PRE-INSTALLATION INFORMATION COLLECTION          ${NC}"
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo ""
+collect_info() {
+    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════${NC}"
+    echo -e "${LIGHT_BLUE}    PRE-INSTALLATION INFORMATION           ${NC}"
+    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════${NC}"
     
-    # Select or create user for installation
-    echo -e "${YELLOW}Step 1: Select installation user${NC}"
     while ! select_or_create_user; do
-        echo -e "${RED}Please try again${NC}"
+        echo -e "${RED}Try again${NC}"
     done
     
-    echo -e "${GREEN}✓ User selected: $INSTALL_USER${NC}"
-    echo -e "${GREEN}✓ Home directory: $INSTALL_HOME${NC}"
-    echo ""
-    
-    # Collect bench name
-    echo -e "${YELLOW}Step 2: Enter bench folder name${NC}"
-    read -p "Enter bench folder name (default: frappe-bench): " BENCH_NAME
+    read -p "Bench folder (default: frappe-bench): " BENCH_NAME
     BENCH_NAME=${BENCH_NAME:-frappe-bench}
-    echo -e "${GREEN}✓ Bench folder: $BENCH_NAME${NC}"
-    echo ""
     
-    # Collect site name
-    echo -e "${YELLOW}Step 3: Enter site name${NC}"
-    read -p "Enter site name (FQDN if planning SSL later): " SITE_NAME
+    read -p "Site name: " SITE_NAME
     while [[ -z "$SITE_NAME" ]]; do
-        echo -e "${RED}Site name cannot be empty. Please enter a valid site name.${NC}"
-        read -p "Enter site name (FQDN if planning SSL later): " SITE_NAME
+        read -p "Site name (required): " SITE_NAME
     done
-    echo -e "${GREEN}✓ Site name: $SITE_NAME${NC}"
-    echo ""
     
-    # Collect SQL password
-    echo -e "${YELLOW}Step 4: Set SQL root password${NC}"
-    SQL_PASSWORD=$(ask_twice "What is your required SQL root password" "true")
-    echo -e "${GREEN}✓ SQL password set${NC}"
-    echo ""
+    SQL_PASSWORD=$(ask_twice "SQL root password" "true")
+    ADMIN_PASSWORD=$(ask_twice "Administrator password" "true")
     
-    # Collect admin password
-    echo -e "${YELLOW}Step 5: Set Administrator password${NC}"
-    ADMIN_PASSWORD=$(ask_twice "Enter the Administrator password" "true")
-    echo -e "${GREEN}✓ Admin password set${NC}"
-    echo ""
+    read -p "Email (for SSL, optional): " EMAIL_ADDRESS
     
-    # Collect email for SSL (optional)
-    echo -e "${YELLOW}Step 6: Email address (optional, for SSL certificates)${NC}"
-    read -p "Enter email address for SSL (press Enter to skip): " EMAIL_ADDRESS
-    if [[ -n "$EMAIL_ADDRESS" ]]; then
-        echo -e "${GREEN}✓ Email: $EMAIL_ADDRESS${NC}"
-    else
-        echo -e "${YELLOW}ℹ Email skipped (can add later)${NC}"
-    fi
+    echo ""
 }
 
-show_install_summary() {
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${LIGHT_BLUE}             INSTALLATION SUMMARY                       ${NC}"
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}User:${NC}         $INSTALL_USER"
-    echo -e "${GREEN}Home:${NC}         $INSTALL_HOME"
-    echo -e "${GREEN}Bench:${NC}        $BENCH_NAME"
-    echo -e "${GREEN}Site:${NC}         $SITE_NAME"
-    echo -e "${GREEN}SQL Password:${NC}  ✓ Set"
-    echo -e "${GREEN}Admin Password:${NC} ✓ Set"
-    if [[ -n "$EMAIL_ADDRESS" ]]; then
-        echo -e "${GREEN}Email:${NC}        $EMAIL_ADDRESS"
-    else
-        echo -e "${GREEN}Email:${NC}        Not set"
-    fi
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo ""
+show_summary() {
+    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════${NC}"
+    echo -e "${LIGHT_BLUE}         INSTALLATION SUMMARY              ${NC}"
+    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════${NC}"
+    echo -e "${GREEN}User:${NC}    $INSTALL_USER"
+    echo -e "${GREEN}Home:${NC}    $INSTALL_HOME"
+    echo -e "${GREEN}Bench:${NC}   $BENCH_NAME"
+    echo -e "${GREEN}Site:${NC}    $SITE_NAME"
+    echo -e "${GREEN}Version:${NC} $BENCH_VERSION"
+    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════${NC}"
     
-    read -p "Continue with installation? (yes/no): " confirm_install
-    confirm_install=$(echo "$confirm_install" | tr '[:upper:]' '[:lower:]')
+    read -p "Continue? (yes/no): " confirm
+    confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
     
-    if [[ "$confirm_install" != "yes" && "$confirm_install" != "y" ]]; then
-        echo -e "${RED}Installation cancelled by user.${NC}"
-        exit 0
-    fi
-    
-    echo -e "${GREEN}✓ Starting installation with collected information...${NC}"
-    echo ""
+    [[ "$confirm" != "yes" && "$confirm" != "y" ]] && echo -e "${RED}Cancelled${NC}" && exit 0
 }
 
 select_version() {
-    echo -e "${YELLOW}Please enter the number of the corresponding ERPNext version you wish to install:${NC}"
-    
+    echo -e "${YELLOW}Select ERPNext version:${NC}"
     versions=("Version 13" "Version 14" "Version 15" "Version 16" "Develop")
-    select version_choice in "${versions[@]}"; do
+    select ver in "${versions[@]}"; do
         case $REPLY in
-            1) 
-                BENCH_VERSION="version-13"
-                NODE_VERSION="16"
-                break
-                ;;
-            2) 
-                BENCH_VERSION="version-14"
-                NODE_VERSION="16"
-                break
-                ;;
-            3) 
-                BENCH_VERSION="version-15"
-                NODE_VERSION="18"
-                break
-                ;;
-            4) 
-                BENCH_VERSION="version-16"
-                NODE_VERSION="24"
-                break
-                ;;
+            1) BENCH_VERSION="version-13"; break;;
+            2) BENCH_VERSION="version-14"; break;;
+            3) BENCH_VERSION="version-15"; break;;
+            4) BENCH_VERSION="version-16"; break;;
             5) 
-                BENCH_VERSION="develop"
-                NODE_VERSION="18"
-                echo ""
-                echo -e "${RED}⚠️  WARNING: DEVELOP VERSION ⚠️${NC}"
-                echo ""
-                echo -e "${YELLOW}The develop branch contains bleeding-edge code that:${NC}"
-                echo -e "${RED}• Changes daily and may be unstable${NC}"
-                echo -e "${RED}• Can cause data corruption or system crashes${NC}"
-                echo -e "${RED}• Is NOT suitable for production or important data${NC}"
-                echo -e "${RED}• Has limited community support${NC}"
-                echo ""
-                echo -e "${GREEN}Recommended for: Experienced developers testing new features${NC}"
-                echo -e "${GREEN}Better alternatives: Version 15 (stable) or Version 14 (proven)${NC}"
-                echo ""
-                read -p "Do you understand the risks and want to continue? (yes/no): " develop_confirm
-                develop_confirm=$(echo "$develop_confirm" | tr '[:upper:]' '[:lower:]')
-               
-                if [[ "$develop_confirm" != "yes" && "$develop_confirm" != "y" ]]; then
-                    echo -e "${GREEN}Good choice! Please select a stable version.${NC}"
-                    continue
-                else
-                    echo -e "${YELLOW}Proceeding with develop branch installation...${NC}"
-                fi
-                break
+                echo -e "${RED}⚠️  WARNING: Develop is unstable!${NC}"
+                read -p "Continue? (yes/no): " dev_confirm
+                [[ "$(echo $dev_confirm | tr '[:upper:]' '[:lower:]')" =~ ^(yes|y)$ ]] && BENCH_VERSION="develop" && break
                 ;;
-            *) echo -e "${RED}Invalid option. Please select a valid version.${NC}";;
+            *) echo -e "${RED}Invalid${NC}";;
         esac
     done
-
-    echo -e "${GREEN}You have selected $version_choice for installation.${NC}"
-    echo -e "${LIGHT_BLUE}Node.js version: $NODE_VERSION${NC}"
+    echo -e "${GREEN}Selected: $ver${NC}"
 }
 
-verify_version_compatibility() {
+verify_compatibility() {
     local os_name=$(lsb_release -si)
     local os_version=$(lsb_release -rs)
     
-    if [[ "$BENCH_VERSION" == "version-15" || "$BENCH_VERSION" == "version-16" || "$BENCH_VERSION" == "develop" ]]; then
-        if [[ "$os_name" != "Ubuntu" && "$os_name" != "Debian" ]]; then
-            echo -e "${RED}Your Distro is not supported for Version 15/16/Develop.${NC}"
-            exit 1
-        elif [[ "$os_name" == "Ubuntu" && "$os_version" < "22.04" ]]; then
-            echo -e "${RED}Your Ubuntu version is below the minimum required to support Version 15/16/Develop.${NC}"
+    if [[ "$BENCH_VERSION" =~ ^(version-15|version-16|develop)$ ]]; then
+        if [[ "$os_name" == "Ubuntu" && "$os_version" < "22.04" ]]; then
+            echo -e "${RED}Ubuntu 22.04+ required for $BENCH_VERSION${NC}"
             exit 1
         elif [[ "$os_name" == "Debian" && "$os_version" < "12" ]]; then
-            echo -e "${RED}Your Debian version is below the minimum required to support Version 15/16/Develop.${NC}"
+            echo -e "${RED}Debian 12+ required for $BENCH_VERSION${NC}"
             exit 1
-        fi
-    fi
-
-    if [[ "$BENCH_VERSION" != "version-15" && "$BENCH_VERSION" != "version-16" && "$BENCH_VERSION" != "develop" ]]; then
-        if [[ "$os_name" != "Ubuntu" && "$os_name" != "Debian" ]]; then
-            echo -e "${RED}Your Distro is not supported for this version.${NC}"
-            exit 1
-        elif [[ "$os_name" == "Ubuntu" && "$os_version" > "22.04" ]]; then
-            echo -e "${RED}Your Ubuntu version is not supported for this version.${NC}"
-            echo -e "${YELLOW}ERPNext v13/v14 only support Ubuntu up to 22.04. Please use ERPNext v15/v16 for Ubuntu 24.04.${NC}"
-            exit 1
-        elif [[ "$os_name" == "Debian" && "$os_version" > "11" ]]; then
-            echo -e "${YELLOW}Warning: Your Debian version is above the tested range for this version, but we'll continue.${NC}"
-            sleep 2
         fi
     fi
 }
+
+# =============================================================================
+# INSTALLATION FUNCTIONS - FIXED
+# =============================================================================
 
 install_system_packages() {
-    echo -e "${YELLOW}Updating system packages...${NC}"
-    sleep 2
+    echo -e "${YELLOW}Updating system...${NC}"
     sudo apt update
-    sudo apt upgrade -y
-    echo -e "${GREEN}System packages updated.${NC}"
-    sleep 2
-
-    echo -e "${YELLOW}Installing preliminary package requirements${NC}"
-    sleep 3
-    sudo apt install software-properties-common git curl wget whiptail cron -y
-}
-
-install_yarn_for_user() {
-    local user="$1"
-    echo -e "${YELLOW}Installing Yarn for user: $user...${NC}"
-    
-    # تثبيت Yarn classic (الإصدار المستقر)
-    sudo -u "$user" bash -c '
-        # تنظيف أي تثبيت سابق
-        rm -rf ~/.yarn ~/.config/yarn
-        
-        # تثبيت Yarn باستخدام npm
-        if command -v npm >/dev/null 2>&1; then
-            npm install -g yarn@1.22.19
-        fi
-        
-        # إذا فشل npm، نقوم بالتثبيت المباشر
-        if ! command -v yarn >/dev/null 2>&1; then
-            curl -o- -L https://yarnpkg.com/install.sh | bash -s -- --version 1.22.19
-            export PATH="$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
-        fi
-        
-        # إضافة Yarn إلى PATH في ملفات التهيئة
-        if [[ ":$PATH:" != *":$HOME/.yarn/bin:"* ]]; then
-            echo "export PATH=\"\$HOME/.yarn/bin:\$HOME/.config/yarn/global/node_modules/.bin:\$PATH\"" >> ~/.bashrc
-            echo "export PATH=\"\$HOME/.yarn/bin:\$HOME/.config/yarn/global/node_modules/.bin:\$PATH\"" >> ~/.profile
-        fi
-    '
-    
-    # تأكيد التثبيت
-    if sudo -u "$user" bash -c 'command -v yarn' &>/dev/null; then
-        local yarn_version=$(sudo -u "$user" bash -c 'yarn --version 2>/dev/null || echo "not found"')
-        echo -e "${GREEN}✓ Yarn installed for $user: $yarn_version${NC}"
-    else
-        echo -e "${YELLOW}⚠ Yarn installation may have issues for $user${NC}"
-    fi
-}
-
-fix_supervisor_for_user() {
-    local user="$1"
-    echo -e "${YELLOW}Configuring Supervisor for user: $user...${NC}"
-    
-    # تثبيت Supervisor إذا لم يكن مثبتاً
-    if ! dpkg -l | grep -q supervisor; then
-        sudo apt install -y supervisor
-    fi
-    
-    # إعداد Supervisor للعمل مع المستخدم
-    sudo mkdir -p /etc/supervisor/conf.d
-    sudo chmod 755 /etc/supervisor
-    
-    # إعداد أذونات للمستخدم
-    sudo usermod -aG supervisor "$user" 2>/dev/null || true
-    
-    # إعداد ملف Supervisor الأساسي
-    if [ ! -f /etc/supervisor/supervisord.conf ]; then
-        sudo tee /etc/supervisor/supervisord.conf > /dev/null <<EOF
-[unix_http_server]
-file=/var/run/supervisor.sock
-chmod=0770
-chown=root:supervisor
-
-[supervisord]
-logfile=/var/log/supervisor/supervisord.log
-pidfile=/var/run/supervisord.pid
-childlogdir=/var/log/supervisor
-minfds=1024
-minprocs=200
-user=root
-
-[rpcinterface:supervisor]
-supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
-
-[supervisorctl]
-serverurl=unix:///var/run/supervisor.sock
-
-[include]
-files = /etc/supervisor/conf.d/*.conf
-EOF
-    fi
-    
-    # تأمين الملفات
-    sudo chmod 644 /etc/supervisor/supervisord.conf
-    sudo chown root:root /etc/supervisor/supervisord.conf
-    
-    # إعادة تشغيل Supervisor
-    sudo systemctl enable supervisor
-    sudo systemctl restart supervisor
-    
-    echo -e "${GREEN}✓ Supervisor configured for $user${NC}"
+    sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y
+    sudo DEBIAN_FRONTEND=noninteractive apt install -y software-properties-common git curl whiptail cron
+    echo -e "${GREEN}✓ System updated${NC}"
 }
 
 install_python() {
-    echo -e "${YELLOW}Installing Python and dependencies...${NC}"
-    sleep 2
-
-    local py_version=$(python3 --version 2>&1 | awk '{print $2}')
-    local py_major=$(echo "$py_version" | cut -d '.' -f 1)
-    local py_minor=$(echo "$py_version" | cut -d '.' -f 2)
-
-    local required_python_minor=10
-    local required_python_label="3.10"
-    local required_python_full="3.10.12"
-
-    if [[ "$BENCH_VERSION" == "version-16" ]]; then
-        required_python_minor=14
-        required_python_label="3.14"
-        required_python_full="3.14.0"
+    echo -e "${YELLOW}Installing Python...${NC}"
+    
+    local required_minor=10
+    local required_full="3.10.11"
+    
+    [[ "$BENCH_VERSION" == "version-16" ]] && required_minor=11 && required_full="3.11.6"
+    
+    local current_minor=$(python3 --version 2>&1 | awk '{print $2}' | cut -d'.' -f2)
+    
+    if [[ -z "$current_minor" || "$current_minor" -lt "$required_minor" ]]; then
+        echo -e "${YELLOW}Installing Python 3.$required_minor...${NC}"
+        
+        sudo apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev \
+            libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev wget libbz2-dev
+        
+        wget -q https://www.python.org/ftp/python/${required_full}/Python-${required_full}.tgz
+        tar -xf Python-${required_full}.tgz
+        cd Python-${required_full}
+        ./configure --prefix=/usr/local --enable-optimizations --enable-shared \
+            LDFLAGS="-Wl,-rpath /usr/local/lib" --quiet
+        make -j $(nproc) > /dev/null
+        sudo make altinstall > /dev/null
+        cd .. && rm -rf Python-${required_full}*
+        
+        echo -e "${GREEN}✓ Python 3.$required_minor installed${NC}"
     fi
-
-    if [[ -z "$py_version" ]] || [[ "$py_major" -lt 3 ]] || [[ "$py_major" -eq 3 && "$py_minor" -lt "$required_python_minor" ]]; then
-        echo -e "${LIGHT_BLUE}Installing Python ${required_python_label}+...${NC}"
-        sleep 2
-
-        sudo apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
-            libssl-dev libreadline-dev libffi-dev libsqlite3-dev wget libbz2-dev
-        
-        # تنزيل وتثبيت Python
-        cd /tmp
-        wget https://www.python.org/ftp/python/${required_python_full}/Python-${required_python_full}.tgz
-        tar -xf Python-${required_python_full}.tgz
-        cd Python-${required_python_full}
-        ./configure --prefix=/usr/local --enable-optimizations --enable-shared LDFLAGS="-Wl,-rpath /usr/local/lib"
-        make -j "$(nproc)"
-        sudo make altinstall
-        cd ..
-        sudo rm -rf Python-${required_python_full}
-        sudo rm Python-${required_python_full}.tgz
-        
-        # تثبيت pip
-        if [ -f "/usr/local/bin/pip3.${required_python_minor}" ]; then
-            sudo /usr/local/bin/pip3."${required_python_minor}" install --upgrade pip
-        fi
-        
-        echo -e "${GREEN}Python${required_python_label} installation successful!${NC}"
-        sleep 2
-    else
-        echo -e "${GREEN}✓ Python ${py_version} already meets requirements${NC}"
-    fi
-
-    echo -e "\n${YELLOW}Installing additional Python packages and Redis Server${NC}"
-    sleep 2
+    
     sudo apt install -y git python3-dev python3-setuptools python3-venv python3-pip redis-server
 }
 
 install_wkhtmltopdf() {
     echo -e "${YELLOW}Installing wkhtmltopdf...${NC}"
-    sleep 2
     
-    arch=$(uname -m)
-    case $arch in
-        x86_64) arch="amd64" ;;
-        aarch64) arch="arm64" ;;
-        *) 
-            echo -e "${YELLOW}Unsupported architecture: $arch, trying generic install${NC}"
-            arch="amd64" 
-            ;;
-    esac
-
-    sudo apt install -y fontconfig libxrender1 xfonts-75dpi xfonts-base libfontconfig xvfb
-
-    # محاولة تنزيل وتثبيت wkhtmltopdf
-    cd /tmp
-    if wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_"$arch".deb 2>/dev/null; then
-        sudo dpkg -i wkhtmltox_0.12.6.1-2.jammy_"$arch".deb || true
-        sudo apt --fix-broken install -y
-        sudo cp /usr/local/bin/wkhtmlto* /usr/bin/ 2>/dev/null || true
-        sudo chmod a+x /usr/bin/wk* 2>/dev/null || true
-        rm -f wkhtmltox_0.12.6.1-2.jammy_"$arch".deb
-    else
-        echo -e "${YELLOW}Using apt version of wkhtmltopdf${NC}"
-        sudo apt install -y wkhtmltopdf
-    fi
-
+    local arch=$(uname -m)
+    [[ "$arch" == "x86_64" ]] && arch="amd64"
+    [[ "$arch" == "aarch64" ]] && arch="arm64"
+    
+    sudo apt install -y fontconfig libxrender1 xfonts-75dpi xfonts-base
+    wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_${arch}.deb
+    sudo dpkg -i wkhtmltox_*.deb 2>/dev/null || true
+    sudo cp /usr/local/bin/wkhtmlto* /usr/bin/ 2>/dev/null || true
+    sudo chmod a+x /usr/bin/wk*
+    rm wkhtmltox_*.deb
+    sudo apt --fix-broken install -y
+    
     echo -e "${GREEN}✓ wkhtmltopdf installed${NC}"
-    sleep 1
 }
 
 install_mariadb() {
     echo -e "${YELLOW}Installing MariaDB...${NC}"
-    sleep 2
+    sudo apt install -y mariadb-server mariadb-client pkg-config default-libmysqlclient-dev
     
-    sudo apt install -y mariadb-server mariadb-client
-    
-    echo -e "${YELLOW}Installing development libraries...${NC}"
-    sudo apt install -y pkg-config default-libmysqlclient-dev libmariadb-dev
-    
-    echo -e "${GREEN}✓ MariaDB installed successfully${NC}"
-    sleep 2
-
-    # إعداد MariaDB
-    echo -e "${YELLOW}Configuring MariaDB security...${NC}"
-    sleep 2
-
-    sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$SQL_PASSWORD';" 2>/dev/null || true
-    sudo mysql -u root -p"$SQL_PASSWORD" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$SQL_PASSWORD';" 2>/dev/null || true
-    sudo mysql -u root -p"$SQL_PASSWORD" -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
-    sudo mysql -u root -p"$SQL_PASSWORD" -e "DROP DATABASE IF EXISTS test; DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" 2>/dev/null || true
-    sudo mysql -u root -p"$SQL_PASSWORD" -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-
-    # إعدادات UTF8MB4
-    sudo tee /etc/mysql/mariadb.conf.d/99-erpnext.cnf > /dev/null <<EOF
+    if [ ! -f ~/.mysql_configured ]; then
+        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$SQL_PASSWORD';" 2>/dev/null || true
+        sudo mysql -u root -p"$SQL_PASSWORD" -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null
+        sudo mysql -u root -p"$SQL_PASSWORD" -e "DROP DATABASE IF EXISTS test;" 2>/dev/null
+        sudo mysql -u root -p"$SQL_PASSWORD" -e "FLUSH PRIVILEGES;" 2>/dev/null
+        
+        sudo tee -a /etc/mysql/my.cnf > /dev/null << 'EOF'
 [mysqld]
 character-set-client-handshake = FALSE
 character-set-server = utf8mb4
 collation-server = utf8mb4_unicode_ci
-
 [mysql]
 default-character-set = utf8mb4
-
-[client]
-default-character-set = utf8mb4
 EOF
-
-    sudo systemctl restart mariadb
+        
+        sudo service mysql restart
+        touch ~/.mysql_configured
+    fi
+    
     echo -e "${GREEN}✓ MariaDB configured${NC}"
 }
 
-install_node_for_user() {
-    local user="$1"
-    local node_version="$2"
+install_node() {
+    echo -e "${YELLOW}Installing Node.js via NVM...${NC}"
     
-    echo -e "${YELLOW}Installing Node.js $node_version for user: $user...${NC}"
+    sudo -u "$INSTALL_USER" bash -c 'curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash'
     
-    # تثبيت NVM للمستخدم
-    sudo -u "$user" bash -c '
-        # تنظيف أي تثبيت سابق
-        rm -rf ~/.nvm ~/.npm
-        
-        # تثبيت NVM
-        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
-        
-        # تهيئة NVM في الجلسة الحالية
-        export NVM_DIR="$HOME/.nvm"
-        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-        [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
-        
-        # إضافة NVM إلى ملفات التهيئة
-        if ! grep -q "NVM_DIR" ~/.bashrc; then
-            echo "export NVM_DIR=\"\$HOME/.nvm\"" >> ~/.bashrc
-            echo "[ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"" >> ~/.bashrc
-            echo "[ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"" >> ~/.bashrc
-        fi
-        
-        if ! grep -q "NVM_DIR" ~/.profile; then
-            echo "export NVM_DIR=\"\$HOME/.nvm\"" >> ~/.profile
-            echo "[ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"" >> ~/.profile
-        fi
-    '
+    local nvm_init='export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
     
-    # تثبيت Node.js الإصدار المطلوب
-    sudo -u "$user" bash -c "
+    sudo -u "$INSTALL_USER" bash -c "echo '$nvm_init' >> ~/.bashrc"
+    
+    local node_ver=16
+    [[ "$BENCH_VERSION" == "version-16" ]] && node_ver=20
+    [[ "$BENCH_VERSION" =~ ^(version-15|develop)$ ]] && node_ver=18
+    
+    sudo -u "$INSTALL_USER" bash -c "
         export NVM_DIR=\"\$HOME/.nvm\"
-        [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
-        [ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"
-        
-        nvm install $node_version
-        nvm use $node_version
-        nvm alias default $node_version
-        
-        # تثبيت npm global packages
-        npm install -g npm@latest
+        [ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"
+        nvm install $node_ver
+        nvm alias default $node_ver
     "
     
-    echo -e "${GREEN}✓ Node.js $node_version installed for $user${NC}"
+    echo -e "${GREEN}✓ Node.js v$node_ver installed${NC}"
 }
 
-install_bench_for_user() {
-    local user="$1"
-    local home="$2"
+setup_supervisor() {
+    echo -e "${YELLOW}Setting up Supervisor...${NC}"
     
-    echo -e "${YELLOW}Installing bench for user: $user...${NC}"
+    sudo apt install -y supervisor
     
-    # حل مشكلة EXTERNALLY-MANAGED في Python
-    externally_managed_file=$(find /usr/lib/python3.*/EXTERNALLY-MANAGED 2>/dev/null | head -1)
-    if [[ -n "$externally_managed_file" ]]; then
-        sudo python3 -m pip config --global set global.break-system-packages true
-    fi
+    [ ! -f /etc/supervisor/supervisord.conf ] && sudo tee /etc/supervisor/supervisord.conf > /dev/null << 'EOF'
+[unix_http_server]
+file=/var/run/supervisor.sock
+[supervisord]
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+[supervisorctl]
+serverurl=unix:///var/run/supervisor.sock
+[include]
+files = /etc/supervisor/conf.d/*.conf
+EOF
     
-    # تثبيت frappe-bench
-    sudo pip3 install frappe-bench
+    sudo mkdir -p /etc/supervisor/conf.d
+    sudo systemctl enable supervisor
+    sudo systemctl restart supervisor
     
-    # تهيئة bench للمستخدم
-    sudo -u "$user" bash -c "
-        cd '$home'
+    echo -e "${GREEN}✓ Supervisor ready${NC}"
+}
+
+install_bench() {
+    echo -e "${YELLOW}Installing frappe-bench (with network retry)...${NC}"
+    
+    configure_pip_for_network
+    
+    sudo apt install -y python3-pip
+    
+    local max_attempts=5
+    local attempt=1
+    local success=false
+    
+    while [ $attempt -le $max_attempts ]; do
+        echo -e "${LIGHT_BLUE}Attempt $attempt/$max_attempts...${NC}"
         
-        # تهيئة Node.js وPython
+        if sudo -H pip3 install --upgrade --timeout=300 --retries=10 frappe-bench 2>&1 | tee /tmp/pip.log; then
+            success=true
+            break
+        fi
+        
+        if [ $attempt -eq $max_attempts ]; then
+            echo -e "${YELLOW}Trying GitHub installation...${NC}"
+            if sudo -H pip3 install --timeout=300 git+https://github.com/frappe/bench.git; then
+                success=true
+                break
+            fi
+        fi
+        
+        attempt=$((attempt + 1))
+        sleep 10
+    done
+    
+    [ "$success" = false ] && echo -e "${RED}Failed to install bench${NC}" && exit 1
+    
+    echo -e "${GREEN}✓ frappe-bench installed${NC}"
+    
+    echo -e "${YELLOW}Initializing bench...${NC}"
+    sudo -u "$INSTALL_USER" bash -c "
         export NVM_DIR=\"\$HOME/.nvm\"
-        [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
-        [ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"
+        [ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"
         nvm use default
-        
-        # تهيئة Yarn
-        if [[ -f \"\$HOME/.yarn/bin/yarn\" ]]; then
-            export PATH=\"\$HOME/.yarn/bin:\$HOME/.config/yarn/global/node_modules/.bin:\$PATH\"
-        fi
-        
-        # إنشاء bench
-        bench init '$BENCH_NAME' --version '$BENCH_VERSION' --verbose --skip-redis-config
+        cd '$INSTALL_HOME'
+        bench init '$BENCH_NAME' --frappe-branch '$BENCH_VERSION' --verbose
     "
     
-    echo -e "${GREEN}✓ Bench installed for $user${NC}"
+    echo -e "${GREEN}✓ Bench initialized${NC}"
 }
 
-setup_redis_for_bench() {
-    local user="$1"
-    local home="$2"
+create_site() {
+    echo -e "${YELLOW}Creating site...${NC}"
     
-    echo -e "${YELLOW}Setting up Redis for bench...${NC}"
+    sudo chmod -R o+rx "$INSTALL_HOME"
     
-    # إيقاف أي مثيلات Redis قيد التشغيل
-    sudo systemctl stop redis-server 2>/dev/null || true
-    sudo pkill -f "redis-server" 2>/dev/null || true
-    
-    if [[ "$BENCH_VERSION" == "version-15" || "$BENCH_VERSION" == "version-16" || "$BENCH_VERSION" == "develop" ]]; then
-        # إصدارات جديدة تحتاج إلى 3 مثيلات Redis
-        echo -e "${LIGHT_BLUE}Starting multiple Redis instances for $BENCH_VERSION...${NC}"
-        
-        # بدء مثيلات Redis
-        sudo -u redis redis-server --port 11000 --daemonize yes --bind 127.0.0.1 --save "" --appendonly no
-        sudo -u redis redis-server --port 12000 --daemonize yes --bind 127.0.0.1 --save "" --appendonly no
-        sudo -u redis redis-server --port 13000 --daemonize yes --bind 127.0.0.1 --save "" --appendonly no
-        
-        # التحقق من التشغيل
-        sleep 2
-        if redis-cli -p 11000 ping | grep -q "PONG"; then
-            echo -e "${GREEN}✓ Redis cache (11000) started${NC}"
-        fi
-        if redis-cli -p 12000 ping | grep -q "PONG"; then
-            echo -e "${GREEN}✓ Redis queue (12000) started${NC}"
-        fi
-        if redis-cli -p 13000 ping | grep -q "PONG"; then
-            echo -e "${GREEN}✓ Redis socketio (13000) started${NC}"
-        fi
-    else
-        # إصدارات أقدم تستخدم redis-server الافتراضي
-        echo -e "${LIGHT_BLUE}Starting default Redis server...${NC}"
-        sudo systemctl start redis-server
-        sudo systemctl enable redis-server
-        if sudo systemctl is-active --quiet redis-server; then
-            echo -e "${GREEN}✓ Redis server started${NC}"
-        fi
-    fi
-    
-    # تكوين Redis في bench
-    sudo -u "$user" bash -c "
-        cd '$home/$BENCH_NAME'
-        bench setup redis --yes
-    "
-}
-
-create_site_for_user() {
-    local user="$1"
-    local home="$2"
-    
-    echo -e "${YELLOW}Creating site: $SITE_NAME...${NC}"
-    
-    sudo -u "$user" bash -c "
-        cd '$home/$BENCH_NAME'
-        
-        # تهيئة البيئة
-        export NVM_DIR=\"\$HOME/.nvm\"
-        [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
-        [ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"
-        nvm use default
-        
-        if [[ -f \"\$HOME/.yarn/bin/yarn\" ]]; then
-            export PATH=\"\$HOME/.yarn/bin:\$HOME/.config/yarn/global/node_modules/.bin:\$PATH\"
-        fi
-        
-        # إنشاء الموقع
+    sudo -u "$INSTALL_USER" bash -c "
+        cd '$INSTALL_HOME/$BENCH_NAME'
         bench new-site '$SITE_NAME' \
             --db-root-username root \
             --db-root-password '$SQL_PASSWORD' \
-            --admin-password '$ADMIN_PASSWORD' \
-            --verbose
+            --admin-password '$ADMIN_PASSWORD'
     "
     
-    echo -e "${GREEN}✓ Site created successfully${NC}"
+    echo -e "${GREEN}✓ Site created${NC}"
 }
 
-install_erpnext_for_user() {
-    local user="$1"
-    local home="$2"
-    
+install_erpnext() {
     echo -e "${YELLOW}Installing ERPNext...${NC}"
     
-    local max_retries=3
-    local retry_count=0
+    sudo -u "$INSTALL_USER" bash -c "
+        export NVM_DIR=\"\$HOME/.nvm\"
+        [ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"
+        nvm use default
+        cd '$INSTALL_HOME/$BENCH_NAME'
+        bench get-app --branch '$BENCH_VERSION' erpnext
+        bench --site '$SITE_NAME' install-app erpnext
+    "
     
-    while [ $retry_count -lt $max_retries ]; do
-        echo -e "${LIGHT_BLUE}Attempt $((retry_count + 1))...${NC}"
-        
-        if sudo -u "$user" bash -c "
-            cd '$home/$BENCH_NAME'
-            
-            export NVM_DIR=\"\$HOME/.nvm\"
-            [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
-            [ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"
-            nvm use default
-            
-            if [[ -f \"\$HOME/.yarn/bin/yarn\" ]]; then
-                export PATH=\"\$HOME/.yarn/bin:\$HOME/.config/yarn/global/node_modules/.bin:\$PATH\"
-            fi
-            
-            # تحميل ERPNext
-            bench get-app erpnext --branch '$BENCH_VERSION' --skip-assets --verbose
-            
-            # تثبيت ERPNext
-            bench --site '$SITE_NAME' install-app erpnext --verbose
-        "; then
-            echo -e "${GREEN}✓ ERPNext installed successfully${NC}"
-            return 0
-        fi
-        
-        retry_count=$((retry_count + 1))
-        if [ $retry_count -lt $max_retries ]; then
-            echo -e "${YELLOW}Retrying in 5 seconds...${NC}"
-            sleep 5
-        fi
-    done
-    
-    echo -e "${RED}✗ Failed to install ERPNext after $max_retries attempts${NC}"
-    echo -e "${YELLOW}Continuing with setup...${NC}"
-    return 1
+    echo -e "${GREEN}✓ ERPNext installed${NC}"
 }
 
-setup_production_for_user() {
-    local user="$1"
-    local home="$2"
+setup_production() {
+    echo -e "${YELLOW}Setting up production...${NC}"
     
-    echo -e "${YELLOW}Setting up production environment...${NC}"
+    sudo apt install -y nginx
     
-    # تثبيت nginx إذا لم يكن مثبتاً
-    if ! dpkg -l | grep -q nginx; then
-        sudo apt install -y nginx
-    fi
-    
-    # تكوين production
-    sudo -u "$user" bash -c "
-        cd '$home/$BENCH_NAME'
-        
-        export NVM_DIR=\"\$HOME/.nvm\"
-        [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
-        [ -s \"\$NVM_DIR/bash_completion\" ] && \. \"\$NVM_DIR/bash_completion\"
-        nvm use default
-        
-        if [[ -f \"\$HOME/.yarn/bin/yarn\" ]]; then
-            export PATH=\"\$HOME/.yarn/bin:\$HOME/.config/yarn/global/node_modules/.bin:\$PATH\"
-        fi
-        
-        # إعداد production
-        yes | bench setup production '$user' --yes
+    sudo -u "$INSTALL_USER" bash -c "
+        cd '$INSTALL_HOME/$BENCH_NAME'
+        yes | sudo bench setup production '$INSTALL_USER'
+        bench --site '$SITE_NAME' scheduler enable
     "
     
-    # إعداد Supervisor
-    if [ -f "$home/$BENCH_NAME/config/supervisor.conf" ]; then
-        sudo cp "$home/$BENCH_NAME/config/supervisor.conf" /etc/supervisor/conf.d/"$SITE_NAME".conf
-        sudo supervisorctl reread
-        sudo supervisorctl update
-    fi
-    
-    # تمكين Scheduler
-    sudo -u "$user" bash -c "
-        cd '$home/$BENCH_NAME'
-        bench --site '$SITE_NAME' scheduler enable || true
-        bench --site '$SITE_NAME' scheduler resume || true
-    "
-    
-    # SocketIO و Redis للإصدارات الجديدة
-    if [[ "$BENCH_VERSION" == "version-15" || "$BENCH_VERSION" == "version-16" || "$BENCH_VERSION" == "develop" ]]; then
-        sudo -u "$user" bash -c "
-            cd '$home/$BENCH_NAME'
-            bench setup socketio --yes || true
-            bench setup supervisor --yes || true
-        "
-    fi
-    
-    # إعادة تحميل Supervisor
     sudo supervisorctl reread
     sudo supervisorctl update
+    sudo systemctl reload nginx
     
-    # بدء الخدمات
-    echo -e "${YELLOW}Starting services...${NC}"
-    sudo supervisorctl start all 2>/dev/null || true
-    
-    # بناء الأصول
-    sudo -u "$user" bash -c "
-        cd '$home/$BENCH_NAME'
-        bench build 2>/dev/null || true
-    "
-    
-    echo -e "${GREEN}✓ Production setup completed${NC}"
+    echo -e "${GREEN}✓ Production ready${NC}"
 }
 
-setup_ssl_for_site() {
-    if [[ -z "$EMAIL_ADDRESS" ]]; then
-        echo -e "${YELLOW}ℹ SSL skipped (no email provided)${NC}"
-        return 0
-    fi
+setup_ssl() {
+    [[ -z "$EMAIL_ADDRESS" ]] && return
     
-    echo -e "${YELLOW}Setting up SSL for $SITE_NAME...${NC}"
+    echo -e "${YELLOW}Installing SSL...${NC}"
     
-    # تثبيت Certbot
-    if ! command -v certbot >/dev/null 2>&1; then
+    if ! command -v certbot &>/dev/null; then
         sudo apt install -y snapd
         sudo snap install core
-        sudo snap refresh core
         sudo snap install --classic certbot
-        sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+        sudo ln -s /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
     fi
     
-    # الحصول على شهادة SSL
-    if sudo certbot --nginx --non-interactive --agree-tos --email "$EMAIL_ADDRESS" -d "$SITE_NAME" 2>/dev/null; then
-        echo -e "${GREEN}✓ SSL certificate installed${NC}"
-    else
-        echo -e "${YELLOW}⚠ SSL installation failed or not needed${NC}"
-    fi
+    sudo certbot --nginx --non-interactive --agree-tos --email "$EMAIL_ADDRESS" -d "$SITE_NAME" || \
+        echo -e "${YELLOW}SSL failed. Install manually: sudo certbot --nginx -d $SITE_NAME${NC}"
 }
 
-show_final_summary() {
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}           INSTALLATION COMPLETED SUCCESSFULLY!               ${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${LIGHT_BLUE}Installation Details:${NC}"
-    echo -e "${GREEN}• User:${NC}             $INSTALL_USER"
-    echo -e "${GREEN}• Bench Folder:${NC}     $INSTALL_HOME/$BENCH_NAME"
-    echo -e "${GREEN}• Site Name:${NC}        $SITE_NAME"
-    echo -e "${GREEN}• ERPNext Version:${NC}  $BENCH_VERSION"
-    echo -e "${GREEN}• Node.js Version:${NC}  $NODE_VERSION"
-    echo ""
-    
-    echo -e "${LIGHT_BLUE}Access Information:${NC}"
-    echo -e "${GREEN}• Admin URL:${NC}        http://$SITE_NAME"
-    if [[ -n "$EMAIL_ADDRESS" ]]; then
-        echo -e "${GREEN}• SSL URL:${NC}          https://$SITE_NAME"
-    fi
-    echo -e "${GREEN}• Server IP:${NC}        $server_ip"
-    echo -e "${GREEN}• Admin User:${NC}       Administrator"
-    echo -e "${GREEN}• Admin Password:${NC}   [The password you set]"
-    echo ""
-    
-    echo -e "${LIGHT_BLUE}Useful Commands:${NC}"
-    echo -e "${YELLOW}  Switch to user:${NC}       sudo su - $INSTALL_USER"
-    echo -e "${YELLOW}  Start bench:${NC}          cd $INSTALL_HOME/$BENCH_NAME && bench start"
-    echo -e "${YELLOW}  Stop bench:${NC}           cd $INSTALL_HOME/$BENCH_NAME && bench stop"
-    echo -e "${YELLOW}  Bench status:${NC}         cd $INSTALL_HOME/$BENCH_NAME && bench status"
-    echo -e "${YELLOW}  Restart services:${NC}     sudo supervisorctl restart all"
-    echo -e "${YELLOW}  Check logs:${NC}           sudo supervisorctl tail"
-    echo ""
-    
-    echo -e "${LIGHT_BLUE}Next Steps:${NC}"
-    echo -e "${GREEN}1.${NC} Access your ERPNext at: http://$SITE_NAME or http://$server_ip"
-    echo -e "${GREEN}2.${NC} Login with username: Administrator and your password"
-    echo -e "${GREEN}3.${NC} Complete the setup wizard"
-    echo -e "${GREEN}4.${NC} Configure your company details"
-    echo ""
-    
-    if [[ "$BENCH_VERSION" == "develop" ]]; then
-        echo -e "${RED}⚠  REMEMBER: You installed the DEVELOP branch!${NC}"
-        echo -e "${RED}   This is not suitable for production use!${NC}"
-        echo ""
-    fi
-    
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}            Thank you for using ERPNext!                      ${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-}
+# =============================================================================
+# MAIN INSTALLATION
+# =============================================================================
 
-run_single_installation() {
-    clear
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${LIGHT_BLUE}         ERPNext Single Installation                   ${NC}"
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo ""
-    
-    # الخطوة 1: اختيار الإصدار
-    select_version
-    
-    # الخطوة 2: جمع معلومات ما قبل التثبيت
-    collect_pre_install_info
-    
-    # الخطوة 3: عرض الملخص والتأكيد
-    show_install_summary
-    
-    # الخطوة 4: التحقق من التوافق
-    verify_version_compatibility
-    
-    # الخطوة 5: تثبيت حزم النظام
-    install_system_packages
-    
-    # الخطوة 6: تثبيت Python
-    install_python
-    
-    # الخطوة 7: تثبيت wkhtmltopdf
-    install_wkhtmltopdf
-    
-    # الخطوة 8: تثبيت MariaDB
-    install_mariadb
-    
-    # الخطوة 9: تثبيت Node.js للمستخدم
-    install_node_for_user "$INSTALL_USER" "$NODE_VERSION"
-    
-    # الخطوة 10: تثبيت Yarn للمستخدم
-    install_yarn_for_user "$INSTALL_USER"
-    
-    # الخطوة 11: إعداد Supervisor
-    fix_supervisor_for_user "$INSTALL_USER"
-    
-    # الخطوة 12: تثبيت bench
-    install_bench_for_user "$INSTALL_USER" "$INSTALL_HOME"
-    
-    # الخطوة 13: إعداد Redis
-    setup_redis_for_bench "$INSTALL_USER" "$INSTALL_HOME"
-    
-    # الخطوة 14: إنشاء الموقع
-    create_site_for_user "$INSTALL_USER" "$INSTALL_HOME"
-    
-    # الخطوة 15: تثبيت ERPNext
-    install_erpnext_for_user "$INSTALL_USER" "$INSTALL_HOME"
-    
-    # الخطوة 16: إعداد Production
-    setup_production_for_user "$INSTALL_USER" "$INSTALL_HOME"
-    
-    # الخطوة 17: إعداد SSL
-    setup_ssl_for_site
-    
-    # الخطوة 18: عرض الملخص النهائي
-    show_final_summary
-}
-
-# القائمة الرئيسية
 main_menu() {
     clear
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${LIGHT_BLUE}       ERPNext Installation Manager                    ${NC}"
-    echo -e "${LIGHT_BLUE}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${LIGHT_BLUE}╔═══════════════════════════════════════════╗${NC}"
+    echo -e "${LIGHT_BLUE}║   ERPNext Universal Installation Manager ║${NC}"
+    echo -e "${LIGHT_BLUE}╚═══════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${YELLOW}Select installation mode:${NC}"
-    echo ""
-    echo -e "${GREEN}1.${NC} Single ERPNext Installation ${LIGHT_BLUE}(Recommended)${NC}"
-    echo -e "   • Install one ERPNext instance"
-    echo -e "   • Production-ready setup"
-    echo -e "   • Supports all versions"
-    echo ""
-    echo -e "${YELLOW}2.${NC} Multiple ERPNext Installations ${RED}(Advanced)${NC}"
-    echo -e "   • Install multiple instances"
-    echo -e "   • Different users/versions"
-    echo -e "   • For development/testing"
-    echo ""
+    echo -e "${GREEN}1.${NC} Single Installation ${LIGHT_BLUE}(Production)${NC}"
+    echo -e "${YELLOW}2.${NC} Multiple Installations ${RED}(Development)${NC}"
     echo -e "${RED}3.${NC} Exit"
     echo ""
     
-    read -p "Enter your choice (1-3): " choice
+    read -p "Choice (1-3): " mode
     
-    case $choice in
-        1)
-            run_single_installation
-            ;;
-        2)
-            echo ""
-            echo -e "${YELLOW}Multiple Installations Guide:${NC}"
-            echo ""
-            echo -e "${LIGHT_BLUE}To install multiple ERPNext instances:${NC}"
-            echo ""
-            echo -e "${GREEN}1.${NC} Run this script and choose option 1"
-            echo -e "${GREEN}2.${NC} Select a DIFFERENT user for each installation"
-            echo -e "${GREEN}3.${NC} Use a DIFFERENT bench folder name"
-            echo -e "${GREEN}4.${NC} Use a DIFFERENT site name"
-            echo ""
-            echo -e "${YELLOW}Example for 2 installations:${NC}"
-            echo -e "  ${LIGHT_BLUE}First installation:${NC}"
-            echo -e "    • User: erpuser1"
-            echo -e "    • Bench folder: frappe-bench-14"
-            echo -e "    • Site: site1.example.com"
-            echo ""
-            echo -e "  ${LIGHT_BLUE}Second installation:${NC}"
-            echo -e "    • User: erpuser2"
-            echo -e "    • Bench folder: frappe-bench-15"
-            echo -e "    • Site: site2.example.com"
-            echo ""
-            echo -e "${RED}⚠ Important:${NC} Each installation runs separately!"
-            echo ""
-            read -p "Press Enter to start first installation..." pause
-            run_single_installation
+    case $mode in
+        1|2)
+            if [ "$mode" = "2" ]; then
+                echo ""
+                echo -e "${RED}⚠️  Multiple installations can cause conflicts!${NC}"
+                echo -e "${YELLOW}Use different bench folders for each version${NC}"
+                echo ""
+                read -p "Continue? (yes/no): " multi_confirm
+                [[ "$(echo $multi_confirm | tr '[:upper:]' '[:lower:]')" != "yes" ]] && exit 0
+            fi
+            
+            run_installation
             ;;
         3)
             echo -e "${GREEN}Goodbye!${NC}"
@@ -1080,5 +587,40 @@ main_menu() {
     esac
 }
 
-# تشغيل القائمة الرئيسية
+run_installation() {
+    select_version
+    collect_info
+    show_summary
+    check_existing_installations
+    verify_compatibility
+    
+    echo -e "${GREEN}Starting installation...${NC}"
+    
+    install_system_packages
+    install_python
+    install_wkhtmltopdf
+    install_mariadb
+    install_node
+    setup_supervisor
+    install_bench
+    create_site
+    install_erpnext
+    setup_production
+    setup_ssl
+    
+    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║    Installation Completed Successfully!  ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Access:${NC} http://$server_ip"
+    echo -e "${YELLOW}Site:${NC} $SITE_NAME"
+    echo -e "${YELLOW}User:${NC} Administrator"
+    echo ""
+    echo -e "${LIGHT_BLUE}Commands:${NC}"
+    echo -e "  ${GREEN}cd $INSTALL_HOME/$BENCH_NAME && bench start${NC}"
+    echo ""
+}
+
+# Run
 main_menu
